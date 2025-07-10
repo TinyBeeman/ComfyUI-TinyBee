@@ -1,6 +1,7 @@
 import math
 import random
 import re
+import glob
 
 class imp_listCountNode:
     def __init__(self):
@@ -165,13 +166,49 @@ class imp_indexedListEntryNode:
     CATEGORY = "🐝TinyBee"
 
 
+
+# New node: Get File List
+class imp_getFileListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "path": ("STRING", {"default": "./", "forceInput": True}),
+                "glob_pattern": ("STRING", {"default": "*.*", "forceInput": True}),
+            },
+            "optional": {
+                "allowed_extensions": ("STRING", {"default": ".jpeg,.jpg,.png,.tiff,.gif,.bmp,.webp"}),
+            }
+        }
+
+    @staticmethod
+    def getFileList(path, glob_pattern, allowed_extensions=None):
+        # allowed_extensions: comma-separated string
+        if allowed_extensions is None or allowed_extensions.strip() == "":
+            allowed = ['.jpeg', '.jpg', '.png', '.tiff', '.gif', '.bmp', '.webp']
+        else:
+            allowed = [ext.strip().lower() for ext in allowed_extensions.split(',') if ext.strip()]
+        pattern = path.rstrip("/\\") + "/" + glob_pattern
+        files = glob.glob(pattern, recursive=True)
+        filtered = [f for f in files if any(f.lower().endswith(ext) for ext in allowed)]
+        return (filtered,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("file_list",)
+    FUNCTION = "getFileList"
+    CATEGORY = "🐝TinyBee"
+
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
     "Random Entry": imp_randomListEntryNode,
     "List Count": imp_listCountNode,
     "Indexed Entry": imp_indexedListEntryNode,
-    "Incrementer": imp_IncrementerNode
+    "Incrementer": imp_IncrementerNode,
+    "Get File List": imp_getFileListNode
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -179,6 +216,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_listCountNode": "List Count",
     "imp_randomListEntryNode": "Random Entry",
     "imp_indexedListEntryNode": "Indexed Entry",
-    "imp_IncrementerNode": "Incrementer"
+    "imp_IncrementerNode": "Incrementer",
+    "imp_getFileListNode": "Get File List"
 }
 
