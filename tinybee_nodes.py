@@ -1,6 +1,5 @@
-import math
+import os
 import random
-import re
 import glob
 
 class imp_listCountNode:
@@ -159,13 +158,40 @@ class imp_indexedListEntryNode:
             return (entry,)
         return None
     
-    INPUT_IS_LIST = True
+    INPUT_IS_LIST = (True,)
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Entry",)
     FUNCTION = "getIndexedListEntry"
     CATEGORY = "🐝TinyBee"
 
 
+class imp_randomizeList:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string_list": ("STRING", {"forceInput": True}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})
+            }
+        }
+
+    @staticmethod
+    def randomizeList(string_list,seed):
+        if not string_list:
+            return None
+        random.seed(seed[0])
+        random.shuffle(string_list)
+        return (string_list,)
+
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("randomized_list",)
+    FUNCTION = "randomizeList"
+    CATEGORY = "🐝TinyBee"
 
 # New node: Get File List
 class imp_getFileListNode:
@@ -176,8 +202,11 @@ class imp_getFileListNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "path": ("STRING", {"default": "./", "forceInput": True}),
-                "glob_pattern": ("STRING", {"default": "*.*", "forceInput": True}),
+                "path": ("STRING", {"default": "./" }),
+                "glob_pattern": ("STRING", {"default": "**/*" }),
+                "sort_method": (["default", "date", "filename", "parent folder", "full path", "random"], {"default": "default"}),
+                "sort_ascending": ("BOOLEAN", {"default": True, "label_on": "Ascending", "label_off": "Descending"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})
             },
             "optional": {
                 "allowed_extensions": ("STRING", {"default": ".jpeg,.jpg,.png,.tiff,.gif,.bmp,.webp"}),
@@ -185,38 +214,85 @@ class imp_getFileListNode:
         }
 
     @staticmethod
-    def getFileList(path, glob_pattern, allowed_extensions=None):
+    def getFileList(path, glob_pattern, sort_method, sort_ascending, seed, allowed_extensions=None):
         # allowed_extensions: comma-separated string
         if allowed_extensions is None or allowed_extensions.strip() == "":
-            allowed = ['.jpeg', '.jpg', '.png', '.tiff', '.gif', '.bmp', '.webp']
+            allowed = []
         else:
             allowed = [ext.strip().lower() for ext in allowed_extensions.split(',') if ext.strip()]
         pattern = path.rstrip("/\\") + "/" + glob_pattern
         files = glob.glob(pattern, recursive=True)
-        filtered = [f for f in files if any(f.lower().endswith(ext) for ext in allowed)]
+        if (len(allowed) > 0):
+            filtered = [f for f in files if any(f.lower().endswith(ext) for ext in allowed)]
+        else:
+            filtered = files
+
+        # Sorting logic
+        if sort_method == "date":
+            filtered.sort(key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0, reverse=not sort_ascending)
+        elif sort_method == "filename":
+            filtered.sort(key=lambda f: os.path.basename(f).lower(), reverse=not sort_ascending)
+        elif sort_method == "parent folder":
+            filtered.sort(key=lambda f: os.path.dirname(f).lower(), reverse=not sort_ascending)
+        elif sort_method == "full path":
+            filtered.sort(key=lambda f: os.path.abspath(f).lower(), reverse=not sort_ascending)
+        elif sort_method == "random":
+            random.seed(seed)
+            random.shuffle(filtered)
+        # "default" does not sort
         return (filtered,)
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("file_list",)
+    OUTPUT_IS_LIST = (True,)
     FUNCTION = "getFileList"
+    CATEGORY = "🐝TinyBee"
+
+class imp_processPathNameNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "path": ("STRING", {"default": "./"}),
+            }
+        }
+
+    @staticmethod
+    def processPathName(path):
+        # Process the path and return the new name
+        full_path = os.path.abspath(path)
+        path_only, file_name = os.path.split(full_path)
+        file_name_base, file_name_ext = os.path.splitext(file_name)
+        return (full_path, path_only, file_name_base, file_name_ext)
+
+    RETURN_TYPES = ("STRING","STRING","STRING","STRING")
+    RETURN_NAMES = ("full_path","path_only","file_name_base","file_name_ext")
+    FUNCTION = "processPathName"
     CATEGORY = "🐝TinyBee"
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
     "Random Entry": imp_randomListEntryNode,
+    "Randomize List": imp_randomizeList,
     "List Count": imp_listCountNode,
     "Indexed Entry": imp_indexedListEntryNode,
     "Incrementer": imp_IncrementerNode,
-    "Get File List": imp_getFileListNode
+    "Get File List": imp_getFileListNode,
+    "Process Path Name": imp_processPathNameNode
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_listCountNode": "List Count",
+    "imp_randomizeList": "Randomize List",
     "imp_randomListEntryNode": "Random Entry",
     "imp_indexedListEntryNode": "Indexed Entry",
     "imp_IncrementerNode": "Incrementer",
-    "imp_getFileListNode": "Get File List"
+    "imp_getFileListNode": "Get File List",
+    "imp_processPathNameNode": "Process Path Name"
 }
 
