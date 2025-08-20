@@ -275,20 +275,20 @@ class imp_filterListNode:
 
         filtered = []
         for item in string_list:
-            if string_filter and string_filter not in item:
+            if string_filter[0] and string_filter[0] not in item:
                 continue
-            if age_filter != -1:
+            if age_filter[0] != -1:
                 # age_filter assumes that item is a path to a file
                 if not os.path.exists(item):
                     continue
-                if age_filter_unit == "days":
-                    age_limit = age_filter * 24 * 60 * 60
-                elif age_filter_unit == "hours":
-                    age_limit = age_filter * 60 * 60
-                elif age_filter_unit == "minutes":
-                    age_limit = age_filter * 60
+                if age_filter_unit[0] == "days":
+                    age_limit = age_filter[0] * 24 * 60 * 60
+                elif age_filter_unit[0] == "hours":
+                    age_limit = age_filter[0] * 60 * 60
+                elif age_filter_unit[0] == "minutes":
+                    age_limit = age_filter[0] * 60
                 # Apply age limit filtering
-                if os.path.getmtime(item) < time.time() - age_limit:
+                if os.path.getmtime(item) < time() - age_limit:
                     continue
 
             filtered.append(item)
