@@ -66,3 +66,6 @@ coverage.xml
 # Windows
 Thumbs.db
 Desktop.ini
+
+*.bat
+.file_list.txt
