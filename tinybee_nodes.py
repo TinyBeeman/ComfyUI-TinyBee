@@ -1,6 +1,7 @@
 import os
 import random
 import glob
+import re
 from time import time
 
 class imp_listCountNode:
@@ -225,15 +226,15 @@ class imp_sortListNode:
     def sortList(string_list,sort_method,sort_ascending,seed):
         if not string_list:
             return None
-        
+
         if sort_method[0] == "date":
-            string_list.sort(key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0, reverse=not sort_ascending)
+            string_list.sort(key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0, reverse=not sort_ascending[0])
         elif sort_method[0] == "filename":
-            string_list.sort(key=lambda f: os.path.basename(f).lower(), reverse=not sort_ascending)
+            string_list.sort(key=lambda f: os.path.basename(f).lower(), reverse=not sort_ascending[0])
         elif sort_method[0] == "parent folder":
-            string_list.sort(key=lambda f: os.path.dirname(f).lower(), reverse=not sort_ascending)
+            string_list.sort(key=lambda f: os.path.dirname(f).lower(), reverse=not sort_ascending[0])
         elif sort_method[0] == "full path":
-            string_list.sort(key=lambda f: os.path.abspath(f).lower(), reverse=not sort_ascending)
+            string_list.sort(key=lambda f: os.path.abspath(f).lower(), reverse=not sort_ascending[0])
         elif sort_method[0] == "random":
             if seed[0] == -1:
                 random.seed()
@@ -303,6 +304,105 @@ class imp_filterListNode:
     CATEGORY = "🐝TinyBee"
 
 
+class imp_replaceListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string_list": ("STRING", {"forceInput": True}),
+                "search_string": ("STRING", {"default": "", "forceInput": False}),
+                "replace_string": ("STRING", {"default": "", "forceInput": False}),
+                "is_regex": ("BOOLEAN", {"default": False})
+            }
+        }
+
+    @staticmethod
+    def replaceList(string_list, search_string, replace_string, is_regex):
+        if not string_list:
+            return None
+
+        replaced = []
+        for item in string_list:
+            if search_string[0] and search_string[0] not in item:
+                continue
+            if is_regex[0]:
+                item = re.sub(search_string[0], replace_string[0], item)
+            else:
+                item = item.replace(search_string[0], replace_string[0])
+            replaced.append(item)
+        return (replaced,)
+
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("replaced_list",)
+    FUNCTION = "replaceList"
+    CATEGORY = "🐝TinyBee"
+
+class imp_filterFileExistsListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string_list": ("STRING", {"forceInput": True}),
+                "source_substring": ("STRING", {"default": "", "forceInput": False}),
+                "dest_substring": ("STRING", {"default": "", "forceInput": False}),
+                "return_existing": ("BOOLEAN", {"default": True})
+            }
+        }
+
+    @staticmethod
+    def filterFileExistsList(string_list, source_substring, dest_substring, return_existing):
+        if not string_list:
+            return None
+
+        # Walk through the list, replacing source_substring with dest_substring,
+        # removing the extension (and last '.' character), and appending a wildcard.
+        # If return_existing is True, only add items that already exist.
+        # If return_existing is False, only add items that don't exist.
+        filtered = []
+        for item in string_list:
+            if not os.path.exists(item):
+                continue
+            if source_substring[0]:
+                search_string = item.replace(source_substring[0], dest_substring[0])
+            else:
+                search_string = item
+            
+            # Remove the extension and .
+            search_string = os.path.splitext(search_string)[0]
+            search_string += "*"
+            matches = glob.glob(search_string)
+            if matches:
+                if return_existing[0]:
+                    filtered.append(item)
+            else:
+                if not return_existing[0]:
+                    filtered.append(item)
+
+        return (filtered,)
+
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("filtered_files",)
+    FUNCTION = "filterFileExistsList"
+    CATEGORY = "🐝TinyBee"
+
 
 class imp_getListFromFileNode:
     def __init__(self):
@@ -341,6 +441,10 @@ class imp_getListFromFileNode:
 class imp_getFileListNode:
     def __init__(self):
         pass
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -453,6 +557,8 @@ class imp_filterWordsNode:
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
     "Filter List": imp_filterListNode,
+    "Replace List": imp_replaceListNode,
+    "Filter Existing Files": imp_filterFileExistsListNode,
     "Filter Words": imp_filterWordsNode,
     "Get File List": imp_getFileListNode,
     "Get List From File": imp_getListFromFileNode,
@@ -469,6 +575,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_filterListNode": "Filter List",
     "imp_filterWordsNode": "Filter Words",
+    "imp_filterFileExistsListNode": "Filter Existing Files",
     "imp_getFileListNode": "Get File List",
     "imp_getListFromFileNode": "Get List From File",
     "imp_IncrementerNode": "Incrementer",
@@ -477,6 +584,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_processPathNameNode": "Process Path Name",
     "imp_randomizeListNode": "Randomize List",
     "imp_randomListEntryNode": "Random Entry",
+    "imp_replaceListNode": "Replace List",
     "imp_sortListNode": "Sort List",
 }
  
