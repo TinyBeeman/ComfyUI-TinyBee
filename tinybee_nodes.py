@@ -2,6 +2,8 @@ import os
 import random
 import glob
 import re
+import json
+import logging
 from time import time
 
 class imp_listCountNode:
@@ -25,7 +27,7 @@ class imp_listCountNode:
     RETURN_TYPES = ("INT",)
     RETURN_NAMES = ("Count",)
     FUNCTION = "countList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 class imp_randomListEntryNode:
     def __init__(self):
@@ -57,7 +59,7 @@ class imp_randomListEntryNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Entry",)
     FUNCTION = "getRandomListEntry"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 class imp_indexedListEntryNode:
     def __init__(self):
@@ -83,10 +85,10 @@ class imp_indexedListEntryNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Entry",)
     FUNCTION = "getIndexedListEntry"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 
-class imp_IncrementerNode:
+class imp_incrementerNode:
     def __init__(self):
         self.counters = {}
 
@@ -115,7 +117,7 @@ class imp_IncrementerNode:
     RETURN_NAMES = ("counter",)
     FUNCTION = "increment_number"
 
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Util"
 
     def increment_number(self, start, end, step, reset_bool=False, unique_id=None):
         counter = int(start)
@@ -172,7 +174,7 @@ class imp_indexedListEntryNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Entry",)
     FUNCTION = "getIndexedListEntry"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 
 class imp_randomizeListNode:
@@ -201,7 +203,7 @@ class imp_randomizeListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("randomized_list",)
     FUNCTION = "randomizeList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 class imp_sortListNode:
     def __init__(self):
@@ -248,7 +250,7 @@ class imp_sortListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("sorted_list",)
     FUNCTION = "sortList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 class imp_filterListNode:
     def __init__(self):
@@ -265,12 +267,13 @@ class imp_filterListNode:
                 "string_list": ("STRING", {"forceInput": True}),
                 "string_filter": ("STRING", {"default": "", "forceInput": False}),
                 "age_filter": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
-                "age_filter_unit": (["days", "hours", "minutes"], {"default": "days"})
+                "age_filter_unit": (["days", "hours", "minutes"], {"default": "days"}),
+                "invert": ("BOOLEAN", {"default": False, "forceInput": False})
             }
         }
 
     @staticmethod
-    def filterList(string_list, string_filter, age_filter, age_filter_unit):
+    def filterList(string_list, string_filter, age_filter, age_filter_unit, invert):
         if not string_list:
             return None
 
@@ -293,6 +296,10 @@ class imp_filterListNode:
                     continue
 
             filtered.append(item)
+        if invert[0]:
+            all_set = set(string_list)
+            filtered_set = set(filtered)
+            filtered = list(all_set - filtered_set)
         return (filtered,)
 
 
@@ -301,7 +308,7 @@ class imp_filterListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("filtered_list",)
     FUNCTION = "filterList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 
 class imp_replaceListNode:
@@ -344,7 +351,7 @@ class imp_replaceListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("replaced_list",)
     FUNCTION = "replaceList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 class imp_filterFileExistsListNode:
     def __init__(self):
@@ -401,7 +408,7 @@ class imp_filterFileExistsListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("filtered_files",)
     FUNCTION = "filterFileExistsList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 
 class imp_getListFromFileNode:
@@ -435,7 +442,7 @@ class imp_getListFromFileNode:
     RETURN_NAMES = ("string_list",)
     OUTPUT_IS_LIST = (True,)
     FUNCTION = "getListFromFile"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 # New node: Get File List
 class imp_getFileListNode:
@@ -494,7 +501,7 @@ class imp_getFileListNode:
     RETURN_NAMES = ("file_list",)
     OUTPUT_IS_LIST = (True,)
     FUNCTION = "getFileList"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Lists"
 
 class imp_processPathNameNode:
     def __init__(self):
@@ -519,9 +526,9 @@ class imp_processPathNameNode:
     RETURN_TYPES = ("STRING","STRING","STRING","STRING")
     RETURN_NAMES = ("full_path","path_only","file_name_base","file_name_ext")
     FUNCTION = "processPathName"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Util"
 
-# New node: Filter Words
+# Filter Words
 class imp_filterWordsNode:
     def __init__(self):
         pass
@@ -550,7 +557,47 @@ class imp_filterWordsNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("filtered_words",)
     FUNCTION = "filterWords"
-    CATEGORY = "🐝TinyBee"
+    CATEGORY = "🐝TinyBee/Util"
+
+
+# Seperates a prompt into up to five parts based on newlines (or double newlines if you prefer)
+class imp_promptSplitterNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prefix_all": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "prompts": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "postfix_all": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "search_string": ("STRING", {"default": "", "forceInput": False}),
+                "replace_string": ("STRING", {"default": "", "forceInput": False}),
+            }
+        }
+    
+    @staticmethod
+    def splitPrompt(prefix_all, prompts, postfix_all, search_string, replace_string):
+        # Split the prompts by newlines, strip whitespace and skip empty lines after stripping
+        parts = [p.strip() for p in prompts.split('\n') if p.strip()]
+        if prefix_all.strip():
+            parts = [prefix_all.strip() + " " + p for p in parts]
+        if postfix_all.strip():
+            parts = [p + " " + postfix_all.strip() for p in parts]
+        if search_string:
+            parts = [p.replace(search_string, replace_string) for p in parts]
+        
+        # Ensure we have exactly 5 parts
+        while len(parts) < 5:
+            parts.append("")
+        return (parts[0], parts[1], parts[2], parts[3], parts[4])
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompt1", "prompt2", "prompt3", "prompt4", "prompt5")
+    OUTPUT_IS_LIST = (False,)
+    FUNCTION = "splitPrompt"
+    CATEGORY = "🐝TinyBee/Util"
 
 
 # A dictionary that contains all nodes you want to export with their names
@@ -562,13 +609,16 @@ NODE_CLASS_MAPPINGS = {
     "Filter Words": imp_filterWordsNode,
     "Get File List": imp_getFileListNode,
     "Get List From File": imp_getListFromFileNode,
-    "Incrementer": imp_IncrementerNode,
     "Indexed Entry": imp_indexedListEntryNode,
     "List Count": imp_listCountNode,
     "Process Path Name": imp_processPathNameNode,
     "Random Entry": imp_randomListEntryNode,
     "Randomize List": imp_randomizeListNode,
-    "Sort List": imp_sortListNode
+    "Sort List": imp_sortListNode,
+
+    "Incrementer": imp_incrementerNode,
+    "Prompt Splitter": imp_promptSplitterNode,
+
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -578,14 +628,16 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_filterFileExistsListNode": "Filter Existing Files",
     "imp_getFileListNode": "Get File List",
     "imp_getListFromFileNode": "Get List From File",
-    "imp_IncrementerNode": "Incrementer",
     "imp_indexedListEntryNode": "Indexed Entry",
     "imp_listCountNode": "List Count",
-    "imp_processPathNameNode": "Process Path Name",
     "imp_randomizeListNode": "Randomize List",
     "imp_randomListEntryNode": "Random Entry",
     "imp_replaceListNode": "Replace List",
     "imp_sortListNode": "Sort List",
+
+    "imp_incrementerNode": "Incrementer",
+    "imp_processPathNameNode": "Process Path Name",
+    "imp_promptSplitterNode": "Prompt Splitter",
 }
  
 
