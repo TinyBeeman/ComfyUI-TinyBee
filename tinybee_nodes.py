@@ -311,6 +311,109 @@ class imp_filterListNode:
     CATEGORY = "🐝TinyBee/Lists"
 
 
+class imp_combineListsNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "list_a": ("STRING", {"forceInput": True}),
+                "list_b": ("STRING", {"forceInput": True}),
+                "operation": (
+                    [
+                        "OR (Union)",
+                        "AND (In both A and B)",
+                        "XOR (A or B but not both)",
+                        "A minus B",
+                        "B minus A",
+                        "CONCAT (Union with duplicates)",
+                    ],
+                    {"default": "OR (Union)"},
+                ),
+            }
+        }
+
+    @staticmethod
+    def combineLists(list_a, list_b, operation):
+        # Normalize inputs to lists
+        a = list_a or []
+        b = list_b or []
+
+        op = operation[0] if isinstance(operation, (list, tuple)) else operation
+
+        def union_distinct(x, y):
+            seen = set()
+            out = []
+            for item in list(x) + list(y):
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
+            return out
+
+        def intersection_distinct(x, y):
+            set_y = set(y)
+            seen = set()
+            out = []
+            for item in x:
+                if item in set_y and item not in seen:
+                    seen.add(item)
+                    out.append(item)
+            return out
+
+        def symmetric_diff_distinct(x, y):
+            set_x = set(x)
+            set_y = set(y)
+            seen = set()
+            out = []
+            for item in list(x) + list(y):
+                in_x = item in set_x
+                in_y = item in set_y
+                if (in_x != in_y) and item not in seen:
+                    seen.add(item)
+                    out.append(item)
+            return out
+
+        def a_minus_b(x, y):
+            set_y = set(y)
+            out = []
+            for item in x:
+                if item not in set_y:
+                    out.append(item)
+            return out
+
+        def b_minus_a(x, y):
+            return a_minus_b(y, x)
+
+        # Choose operation (allow matching by prefix before space for robustness)
+        key = (op or "").split(" ")[0].upper()
+        if key == "OR":
+            result = union_distinct(a, b)
+        elif key == "AND":
+            result = intersection_distinct(a, b)
+        elif key == "XOR":
+            result = symmetric_diff_distinct(a, b)
+        elif key == "A":  # "A minus B"
+            result = a_minus_b(a, b)
+        elif key == "B":  # "B minus A"
+            result = b_minus_a(a, b)
+        elif op.lower().startswith("CONCAT"):
+            result = list(a) + list(b)
+        else:
+            # Fallback to union for unknown value
+            result = union_distinct(a, b)
+
+        return (result,)
+
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("combined",)
+    FUNCTION = "combineLists"
+    CATEGORY = "🐝TinyBee/Lists"
+
+
 class imp_replaceListNode:
     def __init__(self):
         pass
@@ -569,9 +672,9 @@ class imp_promptSplitterNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prefix_all": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "prefix_all": ("STRING", {"default": "", "multiline": False, "forceInput": False}),
                 "prompts": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
-                "postfix_all": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "postfix_all": ("STRING", {"default": "", "multiline": False, "forceInput": False}),
                 "search_string": ("STRING", {"default": "", "forceInput": False}),
                 "replace_string": ("STRING", {"default": "", "forceInput": False}),
             }
@@ -593,9 +696,10 @@ class imp_promptSplitterNode:
             parts.append("")
         return (parts[0], parts[1], parts[2], parts[3], parts[4])
 
-    RETURN_TYPES = ("STRING",)
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("prompt1", "prompt2", "prompt3", "prompt4", "prompt5")
-    OUTPUT_IS_LIST = (False,)
+    # Mark each output explicitly as a non-list scalar to match all five outputs
+    OUTPUT_IS_LIST = (False, False, False, False, False)
     FUNCTION = "splitPrompt"
     CATEGORY = "🐝TinyBee/Util"
 
@@ -604,6 +708,7 @@ class imp_promptSplitterNode:
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
     "Filter List": imp_filterListNode,
+    "Combine Lists": imp_combineListsNode,
     "Replace List": imp_replaceListNode,
     "Filter Existing Files": imp_filterFileExistsListNode,
     "Filter Words": imp_filterWordsNode,
@@ -624,6 +729,7 @@ NODE_CLASS_MAPPINGS = {
 # A dictionary that contains the friendly/humanly readable titles for the nodes
 NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_filterListNode": "Filter List",
+    "imp_combineListsNode": "Combine Lists",
     "imp_filterWordsNode": "Filter Words",
     "imp_filterFileExistsListNode": "Filter Existing Files",
     "imp_getFileListNode": "Get File List",
