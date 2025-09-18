@@ -398,7 +398,7 @@ class imp_combineListsNode:
             result = a_minus_b(a, b)
         elif key == "B":  # "B minus A"
             result = b_minus_a(a, b)
-        elif op.lower().startswith("CONCAT"):
+        elif key.startswith("CONCAT"):
             result = list(a) + list(b)
         else:
             # Fallback to union for unknown value
@@ -682,22 +682,39 @@ class imp_promptSplitterNode:
     
     @staticmethod
     def splitPrompt(prefix_all, prompts, postfix_all, search_string, replace_string):
+        parts = ["", "", "", "", ""]
+        negs = ["", "", "", "", ""]
         # Split the prompts by newlines, strip whitespace and skip empty lines after stripping
-        parts = [p.strip() for p in prompts.split('\n') if p.strip()]
+        lines = [p.strip() for p in prompts.split('\n') if p.strip()]
+        iPart = -1
+        for line in enumerate(lines):
+            line[1] = line[1].strip()
+            # If the line is empty, skip it.
+            if not line[1]:
+                continue
+            # If the line starts with "neg:", put it in the negative part for iPart
+            if line[1].lower().startswith("neg:"):
+                if iPart >= 0 and iPart < 5:
+                    negs[iPart] = line[1]
+                else:
+                    logging.warning(f"Negative prompt found before any positive prompt: {line[1]}")
+                    pass
+            elif iPart < 5:
+                parts[iPart] = line[1]
+                iPart += 1
+
         if prefix_all.strip():
             parts = [prefix_all.strip() + " " + p for p in parts]
         if postfix_all.strip():
             parts = [p + " " + postfix_all.strip() for p in parts]
         if search_string:
             parts = [p.replace(search_string, replace_string) for p in parts]
-        
-        # Ensure we have exactly 5 parts
-        while len(parts) < 5:
-            parts.append("")
-        return (parts[0], parts[1], parts[2], parts[3], parts[4])
+            negs = [n.replace(search_string, replace_string) for n in negs]
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("prompt1", "prompt2", "prompt3", "prompt4", "prompt5")
+        return (parts[0], negs[0], parts[1], negs[1], parts[2], negs[2], parts[3], negs[3], parts[4], negs[4])
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("prompt1", "neg1", "prompt2", "neg2", "prompt3", "neg3", "prompt4", "neg4", "prompt5", "neg5")
     # Mark each output explicitly as a non-list scalar to match all five outputs
     OUTPUT_IS_LIST = (False, False, False, False, False)
     FUNCTION = "splitPrompt"
