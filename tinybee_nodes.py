@@ -4,6 +4,7 @@ import glob
 import re
 import json
 import logging
+import datetime
 from time import time
 
 class imp_listCountNode:
@@ -682,42 +683,91 @@ class imp_promptSplitterNode:
     
     @staticmethod
     def splitPrompt(prefix_all, prompts, postfix_all, search_string, replace_string):
-        parts = ["", "", "", "", ""]
-        negs = ["", "", "", "", ""]
-        # Split the prompts by newlines, strip whitespace and skip empty lines after stripping
-        lines = [p.strip() for p in prompts.split('\n') if p.strip()]
-        iPart = -1
-        for line in enumerate(lines):
-            line[1] = line[1].strip()
-            # If the line is empty, skip it.
-            if not line[1]:
-                continue
-            # If the line starts with "neg:", put it in the negative part for iPart
-            if line[1].lower().startswith("neg:"):
-                if iPart >= 0 and iPart < 5:
-                    negs[iPart] = line[1]
-                else:
-                    logging.warning(f"Negative prompt found before any positive prompt: {line[1]}")
-                    pass
-            elif iPart < 5:
-                parts[iPart] = line[1]
-                iPart += 1
+            parts = ["", "", "", "", ""]
+            negs = ["", "", "", "", ""]
+            # Split the prompts by newlines, strip whitespace and skip empty lines after stripping
+            lines = [p.strip() for p in prompts.split('\n') if p.strip()]
+            iPart = -1
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.lower().startswith("neg:"):
+                    if iPart >= 0 and iPart < 5:
+                        neg_text = line[4:].strip()
+                        if negs[iPart]:
+                            negs[iPart] += ", " + neg_text
+                        else:
+                            negs[iPart] = neg_text
+                            logging.info(f"Added negative prompt to part {iPart + 1}: {neg_text}")
+                    else:
+                        logging.warning(f"Negative prompt found before any positive prompt: {line}")
+                elif iPart < 4:
+                    iPart += 1
+                    if iPart < 5:
+                        parts[iPart] = line
 
-        if prefix_all.strip():
-            parts = [prefix_all.strip() + " " + p for p in parts]
-        if postfix_all.strip():
-            parts = [p + " " + postfix_all.strip() for p in parts]
-        if search_string:
-            parts = [p.replace(search_string, replace_string) for p in parts]
-            negs = [n.replace(search_string, replace_string) for n in negs]
+            if prefix_all.strip():
+                parts = [prefix_all.strip() + " " + p if p else "" for p in parts]
+            if postfix_all.strip():
+                parts = [p + " " + postfix_all.strip() if p else "" for p in parts]
+            if search_string:
+                parts = [p.replace(search_string, replace_string) if p else "" for p in parts]
+                negs = [n.replace(search_string, replace_string) if n else "" for n in negs]
 
-        return (parts[0], negs[0], parts[1], negs[1], parts[2], negs[2], parts[3], negs[3], parts[4], negs[4])
+            # Ensure all outputs are strings, never None
+            safe_parts = [(p if p is not None else "") for p in parts]
+            safe_negs = [(n if n is not None else "") for n in negs]
+            return (
+                safe_parts[0], safe_negs[0],
+                safe_parts[1], safe_negs[1],
+                safe_parts[2], safe_negs[2],
+                safe_parts[3], safe_negs[3],
+                safe_parts[4], safe_negs[4]
+            )
 
     RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING")
     RETURN_NAMES = ("prompt1", "neg1", "prompt2", "neg2", "prompt3", "neg3", "prompt4", "neg4", "prompt5", "neg5")
     # Mark each output explicitly as a non-list scalar to match all five outputs
-    OUTPUT_IS_LIST = (False, False, False, False, False)
+    OUTPUT_IS_LIST = (False, False, False, False, False, False, False, False, False, False)
     FUNCTION = "splitPrompt"
+    CATEGORY = "🐝TinyBee/Util"
+
+class imp_timestampNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    @staticmethod
+    def encode_base62(num):
+        chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        if num == 0:
+            return chars[0]
+        arr = []
+        base = 62
+        while num:
+            num, rem = divmod(num, base)
+            arr.append(chars[rem])
+        arr.reverse()
+        return ''.join(arr)
+
+    @staticmethod
+    def getTimestamp():
+        now = datetime.datetime.now()
+        long_fmt = now.strftime("%Y-%m-%d-%H-%M-%S")
+        date_fmt = now.strftime("%Y-%m-%d")
+        time_fmt = now.strftime("%H-%M-%S")
+        short_raw = now.strftime("%y%m%d%H%M%S")  # e.g. 250919135602
+        short_int = int(short_raw)
+        short_encoded = imp_timestampNode.encode_base62(short_int)
+        return (long_fmt, date_fmt, time_fmt, short_encoded)
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("long", "date", "time", "short")
+    FUNCTION = "getTimestamp"
     CATEGORY = "🐝TinyBee/Util"
 
 
@@ -733,14 +783,14 @@ NODE_CLASS_MAPPINGS = {
     "Get List From File": imp_getListFromFileNode,
     "Indexed Entry": imp_indexedListEntryNode,
     "List Count": imp_listCountNode,
-    "Process Path Name": imp_processPathNameNode,
     "Random Entry": imp_randomListEntryNode,
     "Randomize List": imp_randomizeListNode,
     "Sort List": imp_sortListNode,
 
+    "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
     "Prompt Splitter": imp_promptSplitterNode,
-
+    "Timestamp": imp_timestampNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -761,6 +811,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_incrementerNode": "Incrementer",
     "imp_processPathNameNode": "Process Path Name",
     "imp_promptSplitterNode": "Prompt Splitter",
+    "imp_timestampNode": "Timestamp",
 }
  
+
+
 
