@@ -770,6 +770,119 @@ class imp_timestampNode:
     FUNCTION = "getTimestamp"
     CATEGORY = "🐝TinyBee/Util"
 
+class imp_forceAspectOnBoundsNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "x": ("INT", {"default": 0, "min": -10000, "max": 10000}),
+                "y": ("INT", {"default": 0, "min": -10000, "max": 10000}),
+                "width": ("INT", {"default": 512, "min": 1, "max": 10000}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 10000}),
+                "image_width": ("INT", {"default": 512, "min": 1, "max": 10000}),
+                "image_height": ("INT", {"default": 512, "min": 1, "max": 10000}),
+                # Added step to allow finer precision (ComfyUI defaults to 0.1 if step omitted)
+                "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+                "fit_mode": (["maintain_height", "maintain_width"], {"default": "maintain_height"})
+            }
+        }
+
+    @staticmethod
+    def forceAspectOnBounds(x, y, width, height, image_width, image_height, aspect_ratio, fit_mode):
+        """Adjust a bounding box to the desired aspect ratio while ensuring it fits inside
+        the provided image dimensions. The box is re-centered (as close as possible)
+        around the original box's center. Aspect ratio is strictly preserved.
+
+        Parameters are expected to be raw numeric values (not single‑item lists).
+        """
+
+        # Sanity guards
+        if image_width <= 0 or image_height <= 0:
+            return (x, y, width, height)
+        if aspect_ratio is None or aspect_ratio <= 0:
+            # Just clamp the original box inside the image
+            nx = max(0, min(x, image_width - 1))
+            ny = max(0, min(y, image_height - 1))
+            nw = max(1, min(width, image_width - nx))
+            nh = max(1, min(height, image_height - ny))
+            return (nx, ny, nw, nh)
+
+        # Original center (use floats to retain precision)
+        cx = x + width / 2.0
+        cy = y + height / 2.0
+
+        # Early out if aspect already close AND inside image bounds
+        current_aspect = (width / height) if height != 0 else aspect_ratio
+        if abs(current_aspect - aspect_ratio) < 1e-3:
+            # Ensure it fits (clip & possibly shrink while keeping aspect)
+            new_w, new_h = width, height
+        else:
+            if fit_mode == "maintain_height":
+                new_h = height
+                new_w = new_h * aspect_ratio
+            else:  # maintain_width
+                new_w = width
+                new_h = new_w / aspect_ratio
+
+        # Ensure positive size
+        new_w = max(1.0, new_w)
+        new_h = max(1.0, new_h)
+
+        # If the box exceeds image bounds, scale it down uniformly to fit while keeping aspect
+        if new_w > image_width or new_h > image_height:
+            scale = min(image_width / new_w, image_height / new_h, 1.0)
+            new_w *= scale
+            new_h *= scale
+
+        # Convert to ints, enforce aspect precisely (width drives height)
+        new_w = min(image_width, max(1, int(round(new_w))))
+        new_h = max(1, int(round(new_w / aspect_ratio)))
+
+        if new_h > image_height:
+            # Height overflow after rounding; base on height instead
+            new_h = min(image_height, new_h)
+            new_w = min(image_width, max(1, int(round(new_h * aspect_ratio))))
+            # Recompute height from width in case width had to clamp
+            new_h = max(1, int(round(new_w / aspect_ratio)))
+            if new_h > image_height:  # Final safety clamp (very small images)
+                new_h = image_height
+                new_w = max(1, min(image_width, int(round(new_h * aspect_ratio))))
+
+        # Final safety: ensure still within image (might rarely exceed due to rounding)
+        if new_w > image_width:
+            new_w = image_width
+            new_h = max(1, int(round(new_w / aspect_ratio)))
+        if new_h > image_height:
+            new_h = image_height
+            new_w = max(1, int(round(new_h * aspect_ratio)))
+
+        # Recompute top-left corner to center on original center
+        new_x = int(round(cx - new_w / 2.0))
+        new_y = int(round(cy - new_h / 2.0))
+
+        # Clamp position so box lies fully inside the image
+        max_x = image_width - new_w
+        max_y = image_height - new_h
+        if max_x < 0:  # Image smaller than box width (should not happen after scaling, but guard)
+            new_x = 0
+            new_w = image_width
+        else:
+            new_x = min(max(new_x, 0), max_x)
+        if max_y < 0:
+            new_y = 0
+            new_h = image_height
+        else:
+            new_y = min(max(new_y, 0), max_y)
+
+        return (new_x, new_y, int(new_w), int(new_h))
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("new_x", "new_y", "new_width", "new_height")
+    FUNCTION = "forceAspectOnBounds"
+    CATEGORY = "🐝TinyBee/Util"
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
@@ -791,6 +904,7 @@ NODE_CLASS_MAPPINGS = {
     "Incrementer": imp_incrementerNode,
     "Prompt Splitter": imp_promptSplitterNode,
     "Timestamp": imp_timestampNode,
+    "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -812,6 +926,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_processPathNameNode": "Process Path Name",
     "imp_promptSplitterNode": "Prompt Splitter",
     "imp_timestampNode": "Timestamp",
+    "imp_forceAspectOnBoundsNode": "Force Aspect On Bounds",
 }
  
 
