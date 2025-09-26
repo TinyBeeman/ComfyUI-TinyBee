@@ -457,6 +457,57 @@ class imp_replaceListNode:
     FUNCTION = "replaceList"
     CATEGORY = "🐝TinyBee/Lists"
 
+class imp_splitListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "combined_string": ("STRING", {"default": "", "forceInput": False, "multiline": True}),
+                "delimiter": (["comma", "semicolon", "space", "newline", "custom"], {"default": "newline"}),
+                "custom_delimiter": ("STRING", {"default": ";", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def splitList(combined_string, delimiter, custom_delimiter):
+        # Normalize inputs from ComfyUI conventions (may come as single-item lists)
+        if isinstance(delimiter, (list, tuple)) and delimiter:
+            delimiter = delimiter[0]
+        if isinstance(custom_delimiter, (list, tuple)) and custom_delimiter:
+            custom_delimiter = custom_delimiter[0]
+
+        s = ""
+        if isinstance(combined_string, (list, tuple)):
+            s = "\n".join(str(x) for x in combined_string)
+        elif combined_string is None:
+            s = ""
+        else:
+            s = str(combined_string)
+
+        if delimiter == "comma":
+            delim = ","
+        elif delimiter == "semicolon":
+            delim = ";"
+        elif delimiter == "space":
+            delim = " "
+        elif delimiter == "newline":
+            delim = "\n"
+        else:
+            delim = custom_delimiter or ";"
+
+        parts = [p.strip() for p in s.split(delim) if p.strip()]
+        return (parts,)
+
+    INPUT_IS_LIST = False
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("list",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "splitList"
+    CATEGORY = "🐝TinyBee/Lists"
+
 class imp_filterFileExistsListNode:
     def __init__(self):
         pass
@@ -632,6 +683,8 @@ class imp_processPathNameNode:
     FUNCTION = "processPathName"
     CATEGORY = "🐝TinyBee/Util"
 
+
+
 # Filter Words
 class imp_filterWordsNode:
     def __init__(self):
@@ -784,100 +837,237 @@ class imp_forceAspectOnBoundsNode:
                 "height": ("INT", {"default": 512, "min": 1, "max": 10000}),
                 "image_width": ("INT", {"default": 512, "min": 1, "max": 10000}),
                 "image_height": ("INT", {"default": 512, "min": 1, "max": 10000}),
-                # Added step to allow finer precision (ComfyUI defaults to 0.1 if step omitted)
                 "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}),
                 "fit_mode": (["maintain_height", "maintain_width"], {"default": "maintain_height"})
+            },
+            "optional": {
+                "include_x": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1}),
+                "include_y": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1}),
+                "include_width": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1}),
+                "include_height": ("INT", {"default": 0, "min": 0, "max": 10000, "step": 1}),
+                "include_rel_xy": ("BOOLEAN", {"default": False, "label_on": "Relative to (x,y)", "label_off": "Relative to (0,0)"}),
             }
         }
 
-    @staticmethod
-    def forceAspectOnBounds(x, y, width, height, image_width, image_height, aspect_ratio, fit_mode):
-        """Adjust a bounding box to the desired aspect ratio while ensuring it fits inside
-        the provided image dimensions. The box is re-centered (as close as possible)
-        around the original box's center. Aspect ratio is strictly preserved.
+    # Lightweight rectangle helper for internal clarity
+    class _Rect:
+        __slots__ = ("x", "y", "w", "h")
 
-        Parameters are expected to be raw numeric values (not single‑item lists).
+        def __init__(self, x: float, y: float, w: float, h: float):
+            self.x = float(x)
+            self.y = float(y)
+            self.w = float(max(0.0, w))
+            self.h = float(max(0.0, h))
+
+        @staticmethod
+        def from_xywh(x, y, w, h):
+            return imp_forceAspectOnBoundsNode._Rect(x, y, w, h)
+
+        def copy(self):
+            return imp_forceAspectOnBoundsNode._Rect(self.x, self.y, self.w, self.h)
+
+        @property
+        def right(self):
+            return self.x + self.w
+
+        @property
+        def bottom(self):
+            return self.y + self.h
+
+        @property
+        def cx(self):
+            return self.x + self.w / 2.0
+
+        @property
+        def cy(self):
+            return self.y + self.h / 2.0
+
+        def set_center(self, cx, cy):
+            self.x = float(cx) - self.w / 2.0
+            self.y = float(cy) - self.h / 2.0
+            return self
+
+        def clamp_inside_image(self, iw, ih):
+            # Ensure the rect lies fully within image bounds if possible
+            max_x = max(0.0, iw - self.w)
+            max_y = max(0.0, ih - self.h)
+            self.x = min(max(self.x, 0.0), max_x)
+            self.y = min(max(self.y, 0.0), max_y)
+            return self
+
+        def union(self, other):
+            x1 = min(self.x, other.x)
+            y1 = min(self.y, other.y)
+            x2 = max(self.right, other.right)
+            y2 = max(self.bottom, other.bottom)
+            return imp_forceAspectOnBoundsNode._Rect(x1, y1, x2 - x1, y2 - y1)
+
+        def includes(self, other):
+            return self.x <= other.x and self.y <= other.y and self.right >= other.right and self.bottom >= other.bottom
+
+        def size_fit_aspect(self, aspect, fit_mode, iw, ih):
+            # Compute new size with requested aspect, preserving one dimension per fit_mode,
+            # then scale-down uniformly to fit image if needed; returns a new rect centered
+            # at current center.
+            ar = float(aspect)
+            if ar <= 0:
+                ar = 1.0
+            if fit_mode == "maintain_height":
+                new_h = max(1.0, self.h)
+                new_w = new_h * ar
+            else:
+                new_w = max(1.0, self.w)
+                new_h = new_w / ar
+
+            # If exceeds image, scale down uniformly
+            if new_w > iw or new_h > ih:
+                scale = min(iw / new_w, ih / new_h, 1.0)
+                new_w *= scale
+                new_h *= scale
+
+            # Round to integers and enforce exact aspect by deriving h from w,
+            # falling back to deriving w from h if height would overflow.
+            new_w = min(iw, max(1, int(round(new_w))))
+            new_h = max(1, int(round(new_w / ar)))
+            if new_h > ih:
+                new_h = min(ih, new_h)
+                new_w = min(iw, max(1, int(round(new_h * ar))))
+                new_h = max(1, int(round(new_w / ar)))
+                if new_h > ih:
+                    new_h = ih
+                    new_w = max(1, min(iw, int(round(new_h * ar))))
+
+            r = self.copy()
+            r.w = float(new_w)
+            r.h = float(new_h)
+            r.set_center(self.cx, self.cy)
+            return r
+
+        def shift_to_include(self, inc, iw, ih):
+            # Shift horizontally to include inc as much as possible
+            max_x_pos = max(0.0, iw - self.w)
+            max_y_pos = max(0.0, ih - self.h)
+
+            # Horizontal
+            if inc.w <= self.w:
+                fully_low = inc.x + inc.w - self.w
+                fully_high = inc.x
+                feasible_low = max(0.0, fully_low)
+                feasible_high = min(max_x_pos, fully_high)
+                if feasible_low <= feasible_high:
+                    if self.x < feasible_low:
+                        self.x = feasible_low
+                    elif self.x > feasible_high:
+                        self.x = feasible_high
+                else:
+                    target_x = inc.cx - self.w / 2.0
+                    self.x = min(max(target_x, 0.0), max_x_pos)
+            else:
+                target_x = inc.cx - self.w / 2.0
+                self.x = min(max(target_x, 0.0), max_x_pos)
+
+            # Vertical
+            if inc.h <= self.h:
+                fully_low_y = inc.y + inc.h - self.h
+                fully_high_y = inc.y
+                feasible_low_y = max(0.0, fully_low_y)
+                feasible_high_y = min(max_y_pos, fully_high_y)
+                if feasible_low_y <= feasible_high_y:
+                    if self.y < feasible_low_y:
+                        self.y = feasible_low_y
+                    elif self.y > feasible_high_y:
+                        self.y = feasible_high_y
+                else:
+                    target_y = inc.cy - self.h / 2.0
+                    self.y = min(max(target_y, 0.0), max_y_pos)
+            else:
+                target_y = inc.cy - self.h / 2.0
+                self.y = min(max(target_y, 0.0), max_y_pos)
+
+            return self
+
+    @staticmethod
+    def forceAspectOnBounds(x, y, width, height, image_width, image_height, aspect_ratio, fit_mode, 
+                            include_x=0, include_y=0, include_width=0, include_height=0, include_rel_xy=False):
+        """Adjust a bounding box to the desired aspect ratio while ensuring it fits inside
+        the provided image dimensions. Start from the union of the original rect and the
+        include rect (if any), then size to aspect, clamp within the image, and shift only
+        as needed to include as much of the include rect as possible. Parameters remain
+        unchanged and return types are (INT, INT, INT, INT).
         """
 
-        # Sanity guards
-        if image_width <= 0 or image_height <= 0:
-            return (x, y, width, height)
-        if aspect_ratio is None or aspect_ratio <= 0:
-            # Just clamp the original box inside the image
-            nx = max(0, min(x, image_width - 1))
-            ny = max(0, min(y, image_height - 1))
-            nw = max(1, min(width, image_width - nx))
-            nh = max(1, min(height, image_height - ny))
+        iw = int(image_width)
+        ih = int(image_height)
+
+        # Basic guards
+        if iw <= 0 or ih <= 0:
+            return (int(x), int(y), int(max(1, width)), int(max(1, height)))
+
+        ar = float(aspect_ratio) if aspect_ratio is not None else 0.0
+        if ar <= 0.0:
+            # No aspect enforcement: just clamp original within image
+            nx = max(0, min(int(x), iw - 1))
+            ny = max(0, min(int(y), ih - 1))
+            nw = max(1, min(int(width), iw - nx))
+            nh = max(1, min(int(height), ih - ny))
             return (nx, ny, nw, nh)
 
-        # Original center (use floats to retain precision)
-        cx = x + width / 2.0
-        cy = y + height / 2.0
+        src = imp_forceAspectOnBoundsNode._Rect.from_xywh(x, y, width, height)
 
-        # Early out if aspect already close AND inside image bounds
-        current_aspect = (width / height) if height != 0 else aspect_ratio
-        if abs(current_aspect - aspect_ratio) < 1e-3:
-            # Ensure it fits (clip & possibly shrink while keeping aspect)
-            new_w, new_h = width, height
+        # Build include rect if requested
+        must_include = (include_width > 0 and include_height > 0)
+        if must_include:
+            inc_x = include_x + (x if include_rel_xy else 0)
+            inc_y = include_y + (y if include_rel_xy else 0)
+            inc = imp_forceAspectOnBoundsNode._Rect.from_xywh(inc_x, inc_y, include_width, include_height)
+            # Clamp include to image bounds (non-empty)
+            inc.x = max(0.0, min(inc.x, iw - 1))
+            inc.y = max(0.0, min(inc.y, ih - 1))
+            inc.w = max(1.0, min(inc.w, iw - inc.x))
+            inc.h = max(1.0, min(inc.h, ih - inc.y))
+
+            # Start from the union
+            base = src.union(inc)
+            # If union already covers the entire image, return full image
+            if base.w >= iw and base.h >= ih:
+                return (0, 0, iw, ih)
         else:
-            if fit_mode == "maintain_height":
-                new_h = height
-                new_w = new_h * aspect_ratio
-            else:  # maintain_width
-                new_w = width
-                new_h = new_w / aspect_ratio
+            base = src
+            inc = None
 
-        # Ensure positive size
-        new_w = max(1.0, new_w)
-        new_h = max(1.0, new_h)
+        # Size to aspect around base's center, then clamp inside image
+        sized = base.size_fit_aspect(ar, fit_mode, iw, ih)
+        sized.clamp_inside_image(iw, ih)
 
-        # If the box exceeds image bounds, scale it down uniformly to fit while keeping aspect
-        if new_w > image_width or new_h > image_height:
-            scale = min(image_width / new_w, image_height / new_h, 1.0)
-            new_w *= scale
-            new_h *= scale
+        # If we must include an include-rect, shift only as needed to include it fully,
+        # or otherwise maximize overlap while staying within image bounds.
+        if must_include and inc is not None:
+            if not sized.includes(inc):
+                sized.shift_to_include(inc, iw, ih)
 
-        # Convert to ints, enforce aspect precisely (width drives height)
-        new_w = min(image_width, max(1, int(round(new_w))))
-        new_h = max(1, int(round(new_w / aspect_ratio)))
+        # Final integer outputs
+        out_x = int(round(sized.x))
+        out_y = int(round(sized.y))
+        out_w = int(round(sized.w))
+        out_h = int(round(sized.h))
 
-        if new_h > image_height:
-            # Height overflow after rounding; base on height instead
-            new_h = min(image_height, new_h)
-            new_w = min(image_width, max(1, int(round(new_h * aspect_ratio))))
-            # Recompute height from width in case width had to clamp
-            new_h = max(1, int(round(new_w / aspect_ratio)))
-            if new_h > image_height:  # Final safety clamp (very small images)
-                new_h = image_height
-                new_w = max(1, min(image_width, int(round(new_h * aspect_ratio))))
+        # Final safety clamps & exact aspect enforcement after rounding
+        out_w = min(iw, max(1, out_w))
+        out_h = max(1, int(round(out_w / ar)))
+        if out_h > ih:
+            out_h = min(ih, out_h)
+            out_w = min(iw, max(1, int(round(out_h * ar))))
+            out_h = max(1, int(round(out_w / ar)))
+            if out_h > ih:
+                out_h = ih
+                out_w = max(1, min(iw, int(round(out_h * ar))))
 
-        # Final safety: ensure still within image (might rarely exceed due to rounding)
-        if new_w > image_width:
-            new_w = image_width
-            new_h = max(1, int(round(new_w / aspect_ratio)))
-        if new_h > image_height:
-            new_h = image_height
-            new_w = max(1, int(round(new_h * aspect_ratio)))
+        max_x = iw - out_w
+        max_y = ih - out_h
+        out_x = min(max(out_x, 0), max_x)
+        out_y = min(max(out_y, 0), max_y)
 
-        # Recompute top-left corner to center on original center
-        new_x = int(round(cx - new_w / 2.0))
-        new_y = int(round(cy - new_h / 2.0))
-
-        # Clamp position so box lies fully inside the image
-        max_x = image_width - new_w
-        max_y = image_height - new_h
-        if max_x < 0:  # Image smaller than box width (should not happen after scaling, but guard)
-            new_x = 0
-            new_w = image_width
-        else:
-            new_x = min(max(new_x, 0), max_x)
-        if max_y < 0:
-            new_y = 0
-            new_h = image_height
-        else:
-            new_y = min(max(new_y, 0), max_y)
-
-        return (new_x, new_y, int(new_w), int(new_h))
+        return (out_x, out_y, out_w, out_h)
 
     RETURN_TYPES = ("INT", "INT", "INT", "INT")
     RETURN_NAMES = ("new_x", "new_y", "new_width", "new_height")
@@ -1016,6 +1206,7 @@ NODE_CLASS_MAPPINGS = {
     "Random Entry": imp_randomListEntryNode,
     "Randomize List": imp_randomizeListNode,
     "Sort List": imp_sortListNode,
+    "Split List": imp_splitListNode,
 
     "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
@@ -1039,6 +1230,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_randomListEntryNode": "Random Entry",
     "imp_replaceListNode": "Replace List",
     "imp_sortListNode": "Sort List",
+    "imp_splitListNode": "Split List",
 
     "imp_incrementerNode": "Incrementer",
     "imp_processPathNameNode": "Process Path Name",
