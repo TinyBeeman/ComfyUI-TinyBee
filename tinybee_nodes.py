@@ -884,6 +884,123 @@ class imp_forceAspectOnBoundsNode:
     FUNCTION = "forceAspectOnBounds"
     CATEGORY = "🐝TinyBee/Util"
 
+class imp_selectBoundingBoxNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE", {"default": None}),
+                "data": ("JSON", ),
+                "index": ("STRING", {"default": "", "forceInput": False}),
+                "method": (["biggest", "center", "balanced"], {"default": "balanced", "forceInput": False}),
+            },
+            
+        }
+    
+    RETURN_TYPES = ("STRING", "BBOX")
+    RETURN_NAMES =("center_coordinates", "bboxes")
+    FUNCTION = "segment"
+    CATEGORY = "🐝TinyBee/Util"
+
+    def segment(self, image, data, index, method):
+        # Basic validation of input data structure
+        if not data:
+            # Match Florence2toCoordinates: first return is a JSON string (array of center dicts), second is list of bboxes
+            return (json.dumps([{"x": 0, "y": 0}]), [])
+
+        # Helper to extract bbox list from a possible dict
+        def get_bboxes(item):
+            if isinstance(item, dict) and "bboxes" in item:
+                return item["bboxes"]
+            return item
+
+        try:
+            primary = get_bboxes(data[0]) if isinstance(data, (list, tuple)) and len(data) > 0 else []
+        except Exception:
+            primary = []
+
+        if not isinstance(primary, list):
+            primary = []
+
+        # Parse indices (comma separated). If none valid, fallback to all.
+        indexes = []
+        if isinstance(index, str) and index.strip():
+            for token in [t.strip() for t in index.split(',') if t.strip()]:
+                try:
+                    iv = int(token)
+                    indexes.append(iv)
+                except ValueError:
+                    # Ignore invalid tokens
+                    pass
+        if not indexes:
+            indexes = list(range(len(primary)))
+
+        # Collect valid bboxes from requested indices
+        selected_bboxes = []
+        for idx in indexes:
+            if 0 <= idx < len(primary):
+                bbox = primary[idx]
+                if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                    x1, y1, x2, y2 = bbox
+                    # Skip malformed coordinates
+                    if x2 >= x1 and y2 >= y1:
+                        selected_bboxes.append(list(bbox))
+            # Silently skip invalid indices
+
+        if not selected_bboxes:
+            return (json.dumps([{"x": 0, "y": 0}]), [[0, 0, 0, 0]])
+
+        # Image size handling (PIL Image or tensor / ndarray-like)
+        img_w = img_h = None
+        if hasattr(image, 'size'):
+            try:
+                # PIL.Image returns (w,h); some objects might return tuple
+                img_w, img_h = image.size[0], image.size[1]
+            except Exception:
+                pass
+        if (img_w is None or img_h is None) and hasattr(image, 'shape'):
+            shape = getattr(image, 'shape')
+            if isinstance(shape, (list, tuple)) and len(shape) >= 3:
+                # Assume (B,H,W,C) or (H,W,C)
+                if len(shape) == 4:
+                    _, img_h, img_w, _ = shape
+                else:
+                    img_h, img_w = shape[0], shape[1]
+        if img_w is None or img_h is None:
+            img_w = img_w or 1
+            img_h = img_h or 1
+
+        def area(b):
+            return max(0, (b[2]-b[0])) * max(0, (b[3]-b[1]))
+
+        chosen = selected_bboxes[0]
+        if method == "biggest" and selected_bboxes:
+            chosen = max(selected_bboxes, key=area)
+        elif method == "center" and selected_bboxes:
+            cx_img, cy_img = img_w / 2.0, img_h / 2.0
+            def dist2(b):
+                cx = (b[0] + b[2]) / 2.0
+                cy = (b[1] + b[3]) / 2.0
+                return (cx - cx_img) ** 2 + (cy - cy_img) ** 2
+            chosen = min(selected_bboxes, key=dist2)
+        elif method == "balanced" and selected_bboxes:
+            cx_img, cy_img = img_w / 2.0, img_h / 2.0
+            def score(b):
+                a = area(b) + 1e-5
+                cx = (b[0] + b[2]) / 2.0
+                cy = (b[1] + b[3]) / 2.0
+                d = (cx - cx_img) ** 2 + (cy - cy_img) ** 2
+                return d / a
+            chosen = min(selected_bboxes, key=score)
+
+        # Compute center of selected bbox (chosen based on method)
+        cx = (chosen[0] + chosen[2]) / 2.0
+        cy = (chosen[1] + chosen[3]) / 2.0
+        center_obj = {"x": int(cx), "y": int(cy)}
+
+        # Return a JSON ARRAY of centers (even if single) to keep datatype consistent with Florence2toCoordinates
+        return (json.dumps([center_obj]), [chosen])
+
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
@@ -905,6 +1022,7 @@ NODE_CLASS_MAPPINGS = {
     "Prompt Splitter": imp_promptSplitterNode,
     "Timestamp": imp_timestampNode,
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
+    "Select Bounding Box": imp_selectBoundingBoxNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -927,6 +1045,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_promptSplitterNode": "Prompt Splitter",
     "imp_timestampNode": "Timestamp",
     "imp_forceAspectOnBoundsNode": "Force Aspect On Bounds",
+    "imp_selectBoundingBoxNode": "Select Bounding Box",
 }
  
 
