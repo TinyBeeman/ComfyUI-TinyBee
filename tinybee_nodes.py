@@ -6,6 +6,8 @@ import json
 import logging
 import datetime
 from time import time
+import numpy as np
+import torch
 
 class imp_listCountNode:
     def __init__(self):
@@ -1191,6 +1193,103 @@ class imp_selectBoundingBoxNode:
         # Return a JSON ARRAY of centers (even if single) to keep datatype consistent with Florence2toCoordinates
         return (json.dumps([center_obj]), [chosen])
 
+class imp_getMaskBoundingBoxNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "mask": ("MASK", {"default": None}),
+            },
+        }
+    
+    RETURN_TYPES = ("MASK", "INT", "INT", "INT", "INT")
+    RETURN_NAMES =("mask", "xLeft", "yTop", "width", "height")
+    FUNCTION = "get_bounding_box"
+    CATEGORY = "🐝TinyBee/Util"
+
+    def get_bounding_box(self, mask):
+        """Return a PyTorch mask tensor shaped [B, H, W] and bbox ints.
+
+        - Accepts mask as torch.Tensor, numpy.ndarray, or compatible.
+        - Computes bbox over union across batch and channels (any pixel > 0).
+        - Returns a SOLID rectangular mask: ones inside the bbox, zeros outside.
+        - Output conforms to ComfyUI MASK convention: float32 tensor [B, H, W].
+        """
+        # Normalize to torch tensor
+        if mask is None:
+            # Return an empty 1x1 mask tensor [B,H,W] to satisfy type/shape
+            empty = torch.zeros((1, 1, 1), dtype=torch.float32)
+            return (empty, 0, 0, 0, 0)
+
+        if isinstance(mask, torch.Tensor):
+            t = mask
+        elif isinstance(mask, np.ndarray):
+            t = torch.from_numpy(mask)
+        else:
+            try:
+                # Fallback best-effort
+                t = torch.tensor(mask)
+            except Exception:
+                empty = torch.zeros((1, 1, 1), dtype=torch.float32)
+                return (empty, 0, 0, 0, 0)
+
+        # Ensure float32 for mask math; keep device
+        device = t.device if isinstance(t, torch.Tensor) else "cpu"
+        t = t.to(device=device, dtype=torch.float32)
+
+        # Standardize shape to [B, H, W, C]
+        # Accept [H, W], [H, W, C], [B, H, W], [B, H, W, C]
+        if t.dim() == 2:
+            # [H, W] -> [1, H, W, 1]
+            t = t.unsqueeze(0).unsqueeze(-1)
+        elif t.dim() == 3:
+            H, W, D = t.shape if t.shape[-1] in (1, 3, 4) else (None, None, None)
+            if D is not None:
+                # [H, W, C] -> [1, H, W, C]
+                t = t.unsqueeze(0)
+            else:
+                # [B, H, W] -> [B, H, W, 1]
+                t = t.unsqueeze(-1)
+        elif t.dim() == 4:
+            pass  # already [B, H, W, C]
+        else:
+            # Unsupported rank; return empty
+            empty = torch.zeros((1, 1, 1), dtype=torch.float32, device=device)
+            return (empty, 0, 0, 0, 0)
+
+        # Force single channel output (C=1)
+        if t.shape[-1] != 1:
+            t = t[..., :1]
+
+        B, H, W, _ = t.shape
+
+        # Compute union mask across batch/channel to identify bbox region
+        active_any = (t > 0).any(dim=0).any(dim=-1)  # [H, W]
+
+        if not torch.any(active_any):
+            zero = torch.zeros((B, H, W), dtype=torch.float32, device=device)
+            return (zero, 0, 0, 0, 0)
+
+        ys, xs = torch.where(active_any)
+        x_min = int(xs.min().item())
+        x_max = int(xs.max().item())
+        y_min = int(ys.min().item())
+        y_max = int(ys.max().item())
+
+        width = x_max - x_min + 1
+        height = y_max - y_min + 1
+
+        # Create a rectangular mask and apply it to all batches
+        rect = torch.zeros((H, W), dtype=torch.bool, device=device)
+        rect[y_min:y_max + 1, x_min:x_max + 1] = True
+        rect = rect.unsqueeze(0).unsqueeze(-1)  # [1, H, W, 1]
+
+        # Build solid rectangle mask (ones inside bbox, zeros elsewhere) across all batches
+        bbox_mask = rect.expand(B, H, W, 1).to(dtype=t.dtype)  # [B, H, W, 1]
+        bbox_mask = bbox_mask.squeeze(-1)  # [B, H, W]
+
+        return (bbox_mask, x_min, y_min, width, height)
+
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
@@ -1214,6 +1313,7 @@ NODE_CLASS_MAPPINGS = {
     "Timestamp": imp_timestampNode,
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
+    "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -1238,6 +1338,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_timestampNode": "Timestamp",
     "imp_forceAspectOnBoundsNode": "Force Aspect On Bounds",
     "imp_selectBoundingBoxNode": "Select Bounding Box",
+    "imp_getMaskBoundingBoxNode": "Get Mask Bounding Box",
 }
  
 
