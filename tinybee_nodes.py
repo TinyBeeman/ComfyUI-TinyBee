@@ -8,6 +8,9 @@ import datetime
 from time import time
 import numpy as np
 import torch
+import zipfile
+from io import BytesIO
+from PIL import Image
 
 class imp_listCountNode:
     def __init__(self):
@@ -56,40 +59,13 @@ class imp_randomListEntryNode:
         if (len(string_list) > 0):
             entry = random.choice(string_list)
             return (entry,)
-        return None
+        return ("",)
     
     INPUT_IS_LIST = True
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("Entry",)
     FUNCTION = "getRandomListEntry"
     CATEGORY = "🐝TinyBee/Lists"
-
-class imp_indexedListEntryNode:
-    def __init__(self):
-        pass
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                "index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "string_list": ("STRING", {"forceInput": True}),
-            }
-        }
-    
-    @staticmethod
-    def getIndexedListEntry(index, string_list):
-        if (len(string_list) > 0):
-            entry = string_list[index[0] % len(string_list)]
-            return (entry,)
-        return None
-    
-    INPUT_IS_LIST = True
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("Entry",)
-    FUNCTION = "getIndexedListEntry"
-    CATEGORY = "🐝TinyBee/Lists"
-
 
 class imp_incrementerNode:
     def __init__(self):
@@ -171,7 +147,7 @@ class imp_indexedListEntryNode:
         if (len(string_list) > 0):
             entry = string_list[index[0] % len(string_list)]
             return (entry,)
-        return None
+        return ("",)
     
     INPUT_IS_LIST = (True,)
     RETURN_TYPES = ("STRING",)
@@ -196,7 +172,7 @@ class imp_randomizeListNode:
     @staticmethod
     def randomizeList(string_list,seed):
         if not string_list:
-            return None
+            return ([],)
         random.seed(seed[0])
         random.shuffle(string_list)
         return (string_list,)
@@ -230,7 +206,7 @@ class imp_sortListNode:
     @staticmethod
     def sortList(string_list,sort_method,sort_ascending,seed):
         if not string_list:
-            return None
+            return ([],)
 
         if sort_method[0] == "date":
             string_list.sort(key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0, reverse=not sort_ascending[0])
@@ -278,7 +254,7 @@ class imp_filterListNode:
     @staticmethod
     def filterList(string_list, string_filter, age_filter, age_filter_unit, invert):
         if not string_list:
-            return None
+            return ([],)
 
         filtered = []
         for item in string_list:
@@ -439,12 +415,10 @@ class imp_replaceListNode:
     @staticmethod
     def replaceList(string_list, search_string, replace_string, is_regex):
         if not string_list:
-            return None
+            return ([],)
 
         replaced = []
         for item in string_list:
-            if search_string[0] and search_string[0] not in item:
-                continue
             if is_regex[0]:
                 item = re.sub(search_string[0], replace_string[0], item)
             else:
@@ -532,7 +506,7 @@ class imp_filterFileExistsListNode:
     @staticmethod
     def filterFileExistsList(string_list, source_substring, dest_substring, return_existing):
         if not string_list:
-            return None
+            return ([],)
 
         # Walk through the list, replacing source_substring with dest_substring,
         # removing the extension (and last '.' character), and appending a wildcard.
@@ -824,6 +798,50 @@ class imp_timestampNode:
     RETURN_NAMES = ("long", "date", "time", "short")
     FUNCTION = "getTimestamp"
     CATEGORY = "🐝TinyBee/Util"
+
+class imp_randomizeImageBatchNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_batch": ("IMAGE", {"forceInput": True}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})
+            }
+        }
+
+    @staticmethod
+    def randomizeImageBatch(image_batch, seed):
+        if image_batch is None or len(image_batch) == 0:
+            return (image_batch,)
+        
+        # Convert to torch tensor if not already
+        if isinstance(image_batch, np.ndarray):
+            image_batch = torch.from_numpy(image_batch)
+        elif not isinstance(image_batch, torch.Tensor):
+            # If it's a list, stack into tensor
+            if isinstance(image_batch, list):
+                image_batch = torch.stack([torch.tensor(img) if not isinstance(img, torch.Tensor) else img for img in image_batch])
+            else:
+                image_batch = torch.tensor(image_batch)
+        
+        # Set random seed and shuffle indices
+        random.seed(seed)
+        batch_size = image_batch.shape[0]
+        indices = list(range(batch_size))
+        random.shuffle(indices)
+        
+        # Reorder the batch using the shuffled indices
+        randomized_batch = image_batch[indices]
+        
+        return (randomized_batch,)
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("randomized_image_batch",)
+    FUNCTION = "randomizeImageBatch"
+    CATEGORY = "🐝TinyBee/Images"
 
 class imp_forceAspectOnBoundsNode:
     def __init__(self):
@@ -1199,6 +1217,7 @@ class imp_getMaskBoundingBoxNode:
         return {
             "required": {
                 "mask": ("MASK", {"default": None}),
+                "padPct": ("FLOAT", {"default": 0.0, "min": -100.0, "max": 100.0, "step": 0.1, "help": "Optional padding percentage to expand or shrink the bounding box by a pct of the smallest dimension."}),
             },
         }
     
@@ -1207,7 +1226,7 @@ class imp_getMaskBoundingBoxNode:
     FUNCTION = "get_bounding_box"
     CATEGORY = "🐝TinyBee/Util"
 
-    def get_bounding_box(self, mask):
+    def get_bounding_box(self, mask, padPct=0):
         """Return a PyTorch mask tensor shaped [B, H, W] and bbox ints.
 
         - Accepts mask as torch.Tensor, numpy.ndarray, or compatible.
@@ -1279,9 +1298,37 @@ class imp_getMaskBoundingBoxNode:
         width = x_max - x_min + 1
         height = y_max - y_min + 1
 
+        # Apply padding if padPct is non-zero
+        if padPct != 0:
+            # Calculate padding based on smallest dimension
+            smallest_dim = min(width, height)
+            pad_amount = int(round(smallest_dim * padPct / 100.0))
+            
+            # Apply uniform padding in all four directions
+            x_min -= pad_amount
+            y_min -= pad_amount
+            width += 2 * pad_amount
+            height += 2 * pad_amount
+            
+            # Clip to image bounds
+            if x_min < 0:
+                width += x_min  # reduce width by the amount we're clipping
+                x_min = 0
+            if y_min < 0:
+                height += y_min  # reduce height by the amount we're clipping
+                y_min = 0
+            if x_min + width > W:
+                width = W - x_min
+            if y_min + height > H:
+                height = H - y_min
+            
+            # Ensure minimum dimensions of 1
+            width = max(1, width)
+            height = max(1, height)
+
         # Create a rectangular mask and apply it to all batches
         rect = torch.zeros((H, W), dtype=torch.bool, device=device)
-        rect[y_min:y_max + 1, x_min:x_max + 1] = True
+        rect[y_min:y_min + height, x_min:x_min + width] = True
         rect = rect.unsqueeze(0).unsqueeze(-1)  # [1, H, W, 1]
 
         # Build solid rectangle mask (ones inside bbox, zeros elsewhere) across all batches
@@ -1289,6 +1336,476 @@ class imp_getMaskBoundingBoxNode:
         bbox_mask = bbox_mask.squeeze(-1)  # [B, H, W]
 
         return (bbox_mask, x_min, y_min, width, height)
+
+class imp_intToBoolNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "integer": ("INT", {"default": 0, "min": -2147483648, "max": 2147483647}),
+            }
+        }
+
+    @staticmethod
+    def intToBool(integer):
+        """Convert integer to boolean: returns True if non-zero, False if zero."""
+        return (integer != 0,)
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("boolean",)
+    FUNCTION = "intToBool"
+    CATEGORY = "🐝TinyBee/Casting"
+
+class imp_stringToIntNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string": ("STRING", {"default": "0"}),
+            }
+        }
+
+    @staticmethod
+    def stringToInt(string):
+        """Convert string to integer. Returns 0 if conversion fails."""
+        try:
+            value = int(string)
+        except ValueError:
+            value = 0
+        return (value,)
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("integer",)
+    FUNCTION = "stringToInt"
+    CATEGORY = "🐝TinyBee/Casting"
+
+class imp_isStringEmptyNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "str": ("STRING", {"default": "", "min_length": 0, "max_length": 2147483647}),
+            },
+            "optional": {
+                "trim_whitespace": ("BOOLEAN", {"default": True, "label_on": "Trim Whitespace", "label_off": "No Trim"}),
+            }
+        }
+
+    @staticmethod
+    def isStringEmpty(str, trim_whitespace=True):
+        """Trim the string of all white space and new line characters."""
+        if trim_whitespace:
+            str = str.strip()
+        return (len(str) == 0,)
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("boolean",)
+    FUNCTION = "isStringEmpty"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+# ===========================================================================
+
+
+
+
+
+# QUEUE MANAGEMENT
+
+
+
+
+
+# ===========================================================================
+
+PROPVALUETYPES = ["STRING", "INT", "FLOAT", "BOOLEAN", "OBJECT", "LIST", "JSON", "NULL", "UNKNOWN"]
+def describeType(value):
+    if isinstance(value, str):
+        # Determine if the string is valid JSON
+        try:
+            json.loads(value)
+            return "JSON"
+        except json.JSONDecodeError:
+            return "STRING"
+    elif isinstance(value, int):
+        return "INT"
+    elif isinstance(value, float):
+        return "FLOAT"
+    elif isinstance(value, bool):
+        return "BOOLEAN"
+    elif isinstance(value, list):
+        return "LIST"
+    elif isinstance(value, dict):
+        return "OBJECT"
+    elif value is None:
+        return "NULL"
+    else:
+        return "UNKNOWN"
+
+# Stores the property as a raw JSON string rather than a dict or list.
+def encodeRawJsonProperty(property_name, property_value):
+    propObj = encodeRawProperty(property_name, property_value)
+    propObj["type"] = "JSON"
+    propObj["value"] = json.dumps(property_value)    
+    return propObj
+
+def encodeRawProperty(property_name, property_value, value_type="UNKNOWN"):
+        # Encode a name/value pair as a JSON property string.
+        if value_type == "JSON":
+            return encodeRawJsonProperty(property_name, property_value)
+        
+        if value_type == "UNKNOWN":
+            value_type = describeType(property_value)
+        elif value_type == "NULL":
+            property_value = None
+
+        propObj = {
+            "name": property_name,
+            "type": value_type,
+            "value": property_value
+        }
+        return propObj
+
+class AlwaysEqualProxy(str):
+    def __eq__(self, _):
+        return True
+
+    def __ne__(self, _):
+        return False
+generic_type = AlwaysEqualProxy("*")
+
+class imp_encodeAnyPropertyNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "property_name": ("STRING", {"default": "property"}),
+                "property_value": (generic_type,),
+                "property_type": (PROPVALUETYPES, {"default": "UNKNOWN", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def encodeAnyProperty(property_name, property_value, property_type):
+        return (encodeRawProperty(property_name, property_value, property_type),)
+        
+    RETURN_TYPES = ("TINYPROP",)
+    RETURN_NAMES = ("property",)
+    FUNCTION = "encodeAnyProperty"
+    CATEGORY = "🐝TinyBee/Queue"
+
+class imp_combinePropertiesNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "prop_a": ("TINYPROP", {"default": None, "ForceInput": True}),
+                "prop_b": ("TINYPROP", {"default": None, "ForceInput": True}),
+                "prop_c": ("TINYPROP", {"default": None, "ForceInput": True}),
+                "prop_d": ("TINYPROP", {"default": None, "ForceInput": True}),
+                "existing_properties": ("TINYPROPS", {"default": {}, "ForceInput": True}),
+                "override_existing": ("BOOLEAN", {"default": True, "label_on": "Override Existing", "label_off": "Preserve Existing"}),
+            }
+        }
+
+    @staticmethod
+    def combineProperties(prop_a=None, prop_b=None, prop_c=None, prop_d=None, existing_properties=None, override_existing=True):
+        """Combine multiple JSON-encoded properties into a single JSON dictionary."""
+        combined = {}
+
+        # Load existing properties if valid
+        if existing_properties:
+            existing_dict = existing_properties
+            if isinstance(existing_dict, dict):
+                combined.update(existing_dict)
+
+        # Helper to add property if valid
+        def add_property(prop):
+            if prop:
+                if isinstance(prop, dict) and "name" in prop and "value" in prop:
+                    if override_existing or prop["name"] not in combined:
+                        combined[prop["name"]] = prop
+
+        # Add each property
+        add_property(prop_a)
+        add_property(prop_b)
+        add_property(prop_c)
+        add_property(prop_d)
+
+        return (combined,)
+
+    RETURN_TYPES = ("TINYPROPS",)
+    RETURN_NAMES = ("combined_properties",)
+    FUNCTION = "combineProperties"
+    CATEGORY = "🐝TinyBee/Util"
+
+class imp_getPropertyFromPropertiesNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "properties": ("TINYPROPS", {"default": {}, "ForceInput": True}),
+                "property_name": ("STRING", {"default": "property"}),
+            }
+        }
+
+    @staticmethod
+    def getValueFromProperties(properties, property_name):
+        """Retrieve a property value by name from a JSON-encoded properties dictionary."""
+        props_dict = properties
+        if isinstance(props_dict, dict) and property_name in props_dict:
+            return (props_dict[property_name], props_dict[property_name].get("value", ""), props_dict[property_name].get("type", "UNKNOWN"))
+        return (None, "", "NULL")
+
+    RETURN_TYPES = ("TINYPROP", generic_type, "STRING")
+    RETURN_NAMES = ("property", "value", "value_type")
+    FUNCTION = "getValueFromProperties"
+    CATEGORY = "🐝TinyBee/Util"
+
+
+class imp_getJsonFromPropertiesNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "properties": ("TINYPROPS", {"default": {}, "ForceInput": True}),
+            }
+        }
+
+    @staticmethod
+    def getJsonFromProperties(properties):
+        """Retrieve the entire properties dictionary as a JSON string."""
+        if isinstance(properties, dict):
+            return (json.dumps(properties),)
+        print("imp_getJsonFromPropertiesNode: Invalid properties input; returning empty JSON.")
+        return ("{}",)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("properties_json",)
+    FUNCTION = "getJsonFromProperties"
+    CATEGORY = "🐝TinyBee/Queue"
+
+class imp_saveImageBatchToZipNode:
+    def __init__(self):
+        pass
+        
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_batch": ("IMAGE", {"forceInput": True}),
+                "filepath": ("STRING", {"default": "output.zip", "forceInput": False}),
+                "compress_to_zip": ("BOOLEAN", {"default": True, "label_on": "Compress to Zip", "label_off": "Export as Folder"}), 
+
+            },
+            "optional": {
+                "json_filename": ("STRING", {"default": "metadata.json", "forceInput": False}),
+                "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+            }
+        }
+    
+    @staticmethod
+    def saveImageBatchToZip(image_batch, filepath, compress_to_zip=True, json_filename="", json=""):
+        if image_batch is None or len(image_batch) == 0:
+            return (image_batch,)
+
+        # Convert to torch tensor if not already
+        if isinstance(image_batch, np.ndarray):
+            image_batch = torch.from_numpy(image_batch)
+        elif not isinstance(image_batch, torch.Tensor):
+            # If it's a list, stack into tensor
+            if isinstance(image_batch, list):
+                image_batch = torch.stack([torch.tensor(img) if not isinstance(img, torch.Tensor) else img for img in image_batch])
+            else:
+                image_batch = torch.tensor(image_batch)
+
+        # Create zip file
+        if compress_to_zip:
+            with zipfile.ZipFile(filepath, 'w') as zipf:
+                # Save each image in the batch
+                for i in range(image_batch.shape[0]):
+                    img_tensor = image_batch[i]
+                    img_array = img_tensor.cpu().numpy()
+                    img = Image.fromarray((img_array * 255).astype(np.uint8))
+                    img_bytes = BytesIO()
+                    img.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    zipf.writestr(f'image_{i:04d}.png', img_bytes.read())
+
+                # Optionally add JSON metadata
+                if json_filename and json:
+                    zipf.writestr(json_filename, json)
+        else:
+            # Save images to folder
+            os.makedirs(filepath, exist_ok=True)
+            for i in range(image_batch.shape[0]):
+                img_tensor = image_batch[i]
+                img_array = img_tensor.cpu().numpy()
+                img = Image.fromarray((img_array * 255).astype(np.uint8))
+                img.save(os.path.join(filepath, f'image_{i:04d}.png'))
+
+            # Optionally save JSON metadata
+            if json_filename and json:
+                with open(os.path.join(filepath, json_filename), 'w') as json_file:
+                    json_file.write(json)
+
+        return {}
+
+    RETURN_TYPES = ()
+    FUNCTION = "saveImageBatchToZip"
+    OUTPUT_NODE = True
+    CATEGORY = "🐝TinyBee/Queue"
+
+class imp_loadImageBatchFromZipNode:
+    def __init__(self):
+        pass
+        
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "filepath": ("STRING", {"default": "input.zip", "forceInput": False}),
+                "loadFromFolder": ("BOOLEAN", {"default": False, "label_on": "Load from Folder", "label_off": "Load from Zip"}),
+            }
+        }
+    
+    @staticmethod
+    def loadImageBatchFromZip(filepath, loadFromFolder=False):
+        """
+        Load images and JSON metadata from a zip file or folder.
+        Returns a batch of images as a torch tensor and JSON string.
+        """
+        images = []
+        json_data = "{}"
+        
+        # TODO: REQUIRE PATH VALIDATION
+
+        # Determine the source path - prefer upload if provided
+        source_path = filepath
+        if loadFromFolder:
+            # Load from folder
+            if not os.path.exists(source_path) or not os.path.isdir(source_path):
+                print(f"imp_loadImageBatchFromZipNode: Folder not found: {source_path}")
+                return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), json_data)
+            
+            # Find all image files
+            image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp']
+            image_files = []
+            for filename in os.listdir(source_path):
+                if any(filename.lower().endswith(ext) for ext in image_extensions):
+                    image_files.append(os.path.join(source_path, filename))
+            
+            # Sort files by name
+            image_files.sort()
+            
+            # Load images
+            for img_path in image_files:
+                try:
+                    img = Image.open(img_path).convert('RGB')
+                    img_array = np.array(img).astype(np.float32) / 255.0
+                    images.append(torch.from_numpy(img_array))
+                except Exception as e:
+                    print(f"imp_loadImageBatchFromZipNode: Error loading image {img_path}: {e}")
+            
+            # Look for JSON file (first .json file found)
+            for filename in os.listdir(source_path):
+                if filename.lower().endswith('.json'):
+                    json_path = os.path.join(source_path, filename)
+                    try:
+                        with open(json_path, 'r') as f:
+                            json_data = f.read()
+                        break  # Use first JSON file found
+                    except Exception as e:
+                        print(f"imp_loadImageBatchFromZipNode: Error reading JSON {json_path}: {e}")
+        
+        else:
+            # Load from zip file
+            if not os.path.exists(source_path):
+                print(f"imp_loadImageBatchFromZipNode: Zip file not found: {source_path}")
+                return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), json_data)
+            
+            try:
+                with zipfile.ZipFile(source_path, 'r') as zipf:
+                    # Get list of files in zip
+                    file_list = zipf.namelist()
+                    
+                    # Find and sort image files
+                    image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff', '.webp']
+                    image_files = [f for f in file_list if any(f.lower().endswith(ext) for ext in image_extensions)]
+                    image_files.sort()
+                    
+                    # Load images
+                    for img_name in image_files:
+                        try:
+                            with zipf.open(img_name) as img_file:
+                                img = Image.open(img_file).convert('RGB')
+                                img_array = np.array(img).astype(np.float32) / 255.0
+                                images.append(torch.from_numpy(img_array))
+                        except Exception as e:
+                            print(f"imp_loadImageBatchFromZipNode: Error loading image {img_name} from zip: {e}")
+                    
+                    # Look for JSON file (first .json file found)
+                    json_files = [f for f in file_list if f.lower().endswith('.json')]
+                    if json_files:
+                        try:
+                            with zipf.open(json_files[0]) as json_file:
+                                json_data = json_file.read().decode('utf-8')
+                        except Exception as e:
+                            print(f"imp_loadImageBatchFromZipNode: Error reading JSON from zip: {e}")
+            
+            except Exception as e:
+                print(f"imp_loadImageBatchFromZipNode: Error opening zip file {source_path}: {e}")
+                return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), json_data)
+        
+        # If no images were loaded, return a dummy image
+        if not images:
+            print("imp_loadImageBatchFromZipNode: No images found")
+            return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), json_data)
+        
+        # Stack images into a batch tensor
+        image_batch = torch.stack(images)
+        
+        return (image_batch, json_data)
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image_batch", "json")
+    FUNCTION = "loadImageBatchFromZip"
+    CATEGORY = "🐝TinyBee/Queue"
+
+# ===========================================================================
+
+
+
+
+
+# NODE EXPORTS
+
+
+
+
+
+# ===========================================================================
 
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
@@ -1314,6 +1831,19 @@ NODE_CLASS_MAPPINGS = {
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
+
+    "Int to Boolean": imp_intToBoolNode,
+    "String to Int": imp_stringToIntNode,
+    "Is String Empty": imp_isStringEmptyNode,
+
+    "Randomize Image Batch": imp_randomizeImageBatchNode,
+
+    "Save Image Batch to Zip": imp_saveImageBatchToZipNode,
+    "Load Image Batch from Zip": imp_loadImageBatchFromZipNode,
+    "Encode Any Property": imp_encodeAnyPropertyNode,
+    "Combine Properties": imp_combinePropertiesNode,
+    "Prop From Properties": imp_getPropertyFromPropertiesNode,
+    "Json From Properties": imp_getJsonFromPropertiesNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -1339,8 +1869,18 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_forceAspectOnBoundsNode": "Force Aspect On Bounds",
     "imp_selectBoundingBoxNode": "Select Bounding Box",
     "imp_getMaskBoundingBoxNode": "Get Mask Bounding Box",
+
+    "imp_intToBoolNode": "Int to Boolean",
+    "imp_stringToIntNode": "String to Int",
+    "imp_isStringEmptyNode": "Is String Empty",
+
+    "imp_randomizeImageBatchNode": "Randomize Image Batch",
+
+    "imp_saveImageBatchToZipNode": "Save Image Batch to Zip",
+    "imp_loadImageBatchFromZipNode": "Load Image Batch from Zip",
+    "imp_encodeAnyPropertyNode": "Encode Any Property",
+    "imp_combinePropertiesNode": "Combine Properties",
+    "imp_getPropertyFromPropertiesNode": "Prop From Properties",
+    "imp_getJsonFromPropertiesNode": "Json From Properties",
 }
- 
-
-
 
