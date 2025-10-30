@@ -11,6 +11,7 @@ import torch
 import zipfile
 from io import BytesIO
 from PIL import Image
+import folder_paths
 
 class imp_listCountNode:
     def __init__(self):
@@ -1608,16 +1609,15 @@ class imp_getJsonFromPropertiesNode:
 
 class imp_saveImageBatchToZipNode:
     def __init__(self):
-        pass
+        self.output_dir = folder_paths.get_output_directory()
         
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image_batch": ("IMAGE", {"forceInput": True}),
-                "filepath": ("STRING", {"default": "output.zip", "forceInput": False}),
+                "filename_prefix": ("STRING", {"default": "batch", "forceInput": False}),
                 "compress_to_zip": ("BOOLEAN", {"default": True, "label_on": "Compress to Zip", "label_off": "Export as Folder"}), 
-
             },
             "optional": {
                 "json_filename": ("STRING", {"default": "metadata.json", "forceInput": False}),
@@ -1625,11 +1625,12 @@ class imp_saveImageBatchToZipNode:
             }
         }
     
-    @staticmethod
-    def saveImageBatchToZip(image_batch, filepath, compress_to_zip=True, json_filename="", json=""):
+    def saveImageBatchToZip(self, image_batch, filename_prefix, compress_to_zip=True, json_filename="", json=""):
         if image_batch is None or len(image_batch) == 0:
-            return (image_batch,)
+            return ()
 
+        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir)
+        
         # Convert to torch tensor if not already
         if isinstance(image_batch, np.ndarray):
             image_batch = torch.from_numpy(image_batch)
@@ -1639,10 +1640,12 @@ class imp_saveImageBatchToZipNode:
                 image_batch = torch.stack([torch.tensor(img) if not isinstance(img, torch.Tensor) else img for img in image_batch])
             else:
                 image_batch = torch.tensor(image_batch)
-
+        
+        
         # Create zip file
         if compress_to_zip:
-            with zipfile.ZipFile(filepath, 'w') as zipf:
+            filename = f"{filename_prefix}.zip"
+            with zipfile.ZipFile(os.path.join(full_output_folder, filename), 'w') as zipf:
                 # Save each image in the batch
                 for i in range(image_batch.shape[0]):
                     img_tensor = image_batch[i]
@@ -1658,19 +1661,20 @@ class imp_saveImageBatchToZipNode:
                     zipf.writestr(json_filename, json)
         else:
             # Save images to folder
-            os.makedirs(filepath, exist_ok=True)
+            subpath = os.path.join(full_output_folder, filename)
+            os.makedirs(subpath, exist_ok=True)
             for i in range(image_batch.shape[0]):
                 img_tensor = image_batch[i]
                 img_array = img_tensor.cpu().numpy()
                 img = Image.fromarray((img_array * 255).astype(np.uint8))
-                img.save(os.path.join(filepath, f'image_{i:04d}.png'))
+                img.save(os.path.join(subpath, f'image_{i:04d}.png'))
 
             # Optionally save JSON metadata
             if json_filename and json:
-                with open(os.path.join(filepath, json_filename), 'w') as json_file:
+                with open(os.path.join(subpath, json_filename), 'w') as json_file:
                     json_file.write(json)
 
-        return {}
+        return ()
 
     RETURN_TYPES = ()
     FUNCTION = "saveImageBatchToZip"
@@ -1685,13 +1689,13 @@ class imp_loadImageBatchFromZipNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "filepath": ("STRING", {"default": "input.zip", "forceInput": False}),
+                "filename": ("STRING", {"default": "input.zip", "forceInput": False}),
                 "loadFromFolder": ("BOOLEAN", {"default": False, "label_on": "Load from Folder", "label_off": "Load from Zip"}),
             }
         }
     
     @staticmethod
-    def loadImageBatchFromZip(filepath, loadFromFolder=False):
+    def loadImageBatchFromZip(filename, loadFromFolder=False):
         """
         Load images and JSON metadata from a zip file or folder.
         Returns a batch of images as a torch tensor and JSON string.
@@ -1699,7 +1703,13 @@ class imp_loadImageBatchFromZipNode:
         images = []
         json_data = "{}"
         
-        # TODO: REQUIRE PATH VALIDATION
+        # Validate that the resolved path stays within the output directory
+        output_dir = os.path.abspath(folder_paths.get_output_directory())
+        filepath = os.path.abspath(os.path.join(output_dir, filename))
+        
+        # Security check: ensure filepath is within output_dir
+        if not filepath.startswith(output_dir + os.sep) and filepath != output_dir:
+            raise ValueError(f"Invalid filename: path traversal detected. Path must be within output directory.")
 
         # Determine the source path - prefer upload if provided
         source_path = filepath
