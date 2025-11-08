@@ -36,6 +36,103 @@ class imp_listCountNode:
     FUNCTION = "countList"
     CATEGORY = "🐝TinyBee/Lists"
 
+
+class TinyFolderStructure:
+    def __init__(self, path):
+        self.path = path
+        self.subfolders = []
+
+    def populateSubfolders(self, file_list):
+        # file_list is a list of files with paths.
+        # First let's remove any files that are not under self.path
+        relevant_files = [f for f in file_list if f.startswith(self.path)]
+        # Now create a set of unique subfolders
+        subfolder_set = set()
+        for file_path in relevant_files:
+            rel_path = os.path.relpath(file_path, self.path)
+            parts = rel_path.split(os.sep)
+            if len(parts) > 1:
+                subfolder = parts[0]
+                subfolder_set.add(subfolder)
+
+        self.subfolders = [TinyFolderStructure(os.path.join(self.path, subfolder)) for subfolder in subfolder_set]
+        # Recursively populate subfolders
+        for subfolder in self.subfolders:
+            subfolder.populateSubfolders(relevant_files)
+
+    def getSubfolders(self):
+        return self.subfolders
+
+class imp_randomFileEntryNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
+                "file_list": ("STRING", {"forceInput": True}),
+            },
+            "optional": {
+                "even_chance_depth": ("INT", {"default": 0, "forceInput": False, "help": "If > 0, will randomly choose from subfolders to that level of depth, -1 for all levels"}),
+            }
+        }
+    
+    @staticmethod
+    def getRandomFileEntry(seed, file_list, even_chance_depth=0):
+        # Fix: Access list parameters consistently
+        seed_value = seed[0] if isinstance(seed, list) else seed
+        depth_value = even_chance_depth[0] if isinstance(even_chance_depth, list) else even_chance_depth
+        
+        if seed_value == -1:
+            random.seed()
+        else:
+            random.seed(seed_value)
+
+        if len(file_list) <= 0:
+            return ("",)
+
+        if depth_value == 0:
+            return (random.choice(file_list),)
+        
+        # Fix: Handle potential commonpath error
+        try:
+            common_root = os.path.commonpath(file_list)
+        except ValueError:
+            # Fallback if paths are on different drives
+            return (random.choice(file_list),)
+        
+        folder_structure = TinyFolderStructure(common_root)
+        folder_structure.populateSubfolders(file_list)
+
+        current_folder = folder_structure
+        depth = 0
+        while True:
+            subfolders = current_folder.getSubfolders()
+            if not subfolders:
+                break
+            if depth_value != -1 and depth >= depth_value:
+                break
+            current_folder = random.choice(subfolders)
+            print(f"Random folder at depth {depth + 1}: {current_folder.path}")
+            depth += 1
+
+        final_files = [f for f in file_list if f.startswith(current_folder.path)]
+        if final_files:
+            return (random.choice(final_files),)
+        
+        print("Error: No files found in selected folder depth.")
+        # Safer fallback
+        return (random.choice(file_list) if file_list else "",)
+
+    INPUT_IS_LIST = True
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("Entry",)
+    FUNCTION = "getRandomFileEntry"
+    CATEGORY = "🐝TinyBee/Lists"
+
+
 class imp_randomListEntryNode:
     def __init__(self):
         pass
@@ -184,6 +281,42 @@ class imp_randomizeListNode:
     RETURN_NAMES = ("randomized_list",)
     FUNCTION = "randomizeList"
     CATEGORY = "🐝TinyBee/Lists"
+
+# Split a list at the specified index into two lists
+class imp_splitListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "input_list": ("STRING", {"forceInput": True}),
+                "split_index": ("INT", {"default": 1, "min": 0}),
+            }
+        }
+
+    @staticmethod
+    def splitList(input_list, split_index):
+        if not isinstance(input_list, list):
+            raise ValueError("Input must be a list.")
+
+        index = split_index[0]
+        if index <= 0:
+            return ([], input_list)
+        if index > len(input_list):
+            return (input_list, [])
+
+        return (input_list[:index], input_list[index:])
+    
+
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,True)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("first_part", "second_part")
+    FUNCTION = "splitList"
+    CATEGORY = "🐝TinyBee/Lists"
+
 
 class imp_sortListNode:
     def __init__(self):
@@ -434,7 +567,7 @@ class imp_replaceListNode:
     FUNCTION = "replaceList"
     CATEGORY = "🐝TinyBee/Lists"
 
-class imp_splitListNode:
+class imp_stringToListNode:
     def __init__(self):
         pass
 
@@ -449,7 +582,7 @@ class imp_splitListNode:
         }
 
     @staticmethod
-    def splitList(combined_string, delimiter, custom_delimiter):
+    def parseList(combined_string, delimiter, custom_delimiter):
         # Normalize inputs from ComfyUI conventions (may come as single-item lists)
         if isinstance(delimiter, (list, tuple)) and delimiter:
             delimiter = delimiter[0]
@@ -482,7 +615,7 @@ class imp_splitListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("list",)
     OUTPUT_IS_LIST = (True,)
-    FUNCTION = "splitList"
+    FUNCTION = "parseList"
     CATEGORY = "🐝TinyBee/Lists"
 
 class imp_filterFileExistsListNode:
@@ -1338,6 +1471,58 @@ class imp_getMaskBoundingBoxNode:
 
         return (bbox_mask, x_min, y_min, width, height)
 
+CASE_MATCH_TYPES = ["case sensitive", "case insensitive", "match case"]
+class imp_searchReplaceNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "input_string": ("STRING", {"default": "", "multiline": True}),
+                "search_string": ("STRING", {"default": "", "forceInput": False}),
+                "replace_string": ("STRING", {"default": "", "forceInput": False}),
+                "case_sensitive": (CASE_MATCH_TYPES, {"default": CASE_MATCH_TYPES[0], "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def searchReplace(input_string, search_string, replace_string, case_sensitive=CASE_MATCH_TYPES[0], match_case=False):
+        if not search_string:
+            return (input_string,)
+
+        def match_replacement_case(found, replacement):
+            if found.islower():
+                return replacement.lower()
+            elif found.isupper():
+                return replacement.upper()
+            elif found[0].isupper() and found[1:].islower():
+                return replacement.capitalize()
+            else:
+                return replacement
+        
+        if case_sensitive == "case insensitive":
+            pattern = re.compile(re.escape(search_string), re.IGNORECASE)
+            result = pattern.sub(replace_string, input_string)
+        elif case_sensitive == "match case":
+            def replacer(match):
+                found = match.group(0)
+                return match_replacement_case(found, replace_string)
+            pattern = re.compile(re.escape(search_string), re.IGNORECASE)
+            result = pattern.sub(replacer, input_string)
+        else:
+            result = input_string.replace(search_string, replace_string)
+
+        return (result,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("output_string",)
+    FUNCTION = "searchReplace"
+    CATEGORY = "🐝TinyBee/Util"
+
+
+
 class imp_intToBoolNode:
     def __init__(self):
         pass
@@ -1413,6 +1598,35 @@ class imp_isStringEmptyNode:
     FUNCTION = "isStringEmpty"
     CATEGORY = "🐝TinyBee/Casting"
 
+
+class imp_stringContainsNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string": ("STRING", {"default": ""}),
+                "substring": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "case_sensitive": ("BOOLEAN", {"default": True, "label_on": "Case Sensitive", "label_off": "Case Insensitive"}),
+            }
+        }
+
+    @staticmethod
+    def stringContains(string, substring, case_sensitive=True):
+        """Check if the substring is contained within the string."""
+        if not case_sensitive:
+            string = string.lower()
+            substring = substring.lower()
+        return (substring in string,)
+    
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("contains",)
+    FUNCTION = "stringContains"
+    CATEGORY = "🐝TinyBee/Casting"
 
 # ===========================================================================
 
@@ -1681,6 +1895,8 @@ class imp_saveImageBatchToZipNode:
     OUTPUT_NODE = True
     CATEGORY = "🐝TinyBee/Queue"
 
+
+
 class imp_loadImageBatchFromZipNode:
     def __init__(self):
         pass
@@ -1830,9 +2046,11 @@ NODE_CLASS_MAPPINGS = {
     "Indexed Entry": imp_indexedListEntryNode,
     "List Count": imp_listCountNode,
     "Random Entry": imp_randomListEntryNode,
+    "Random File Entry": imp_randomFileEntryNode,
     "Randomize List": imp_randomizeListNode,
     "Sort List": imp_sortListNode,
     "Split List": imp_splitListNode,
+    "String To List": imp_stringToListNode,
 
     "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
@@ -1841,10 +2059,12 @@ NODE_CLASS_MAPPINGS = {
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
+    "Search and Replace": imp_searchReplaceNode,
 
     "Int to Boolean": imp_intToBoolNode,
     "String to Int": imp_stringToIntNode,
     "Is String Empty": imp_isStringEmptyNode,
+    "Search To Boolean": imp_stringContainsNode,
 
     "Randomize Image Batch": imp_randomizeImageBatchNode,
 
@@ -1868,9 +2088,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_listCountNode": "List Count",
     "imp_randomizeListNode": "Randomize List",
     "imp_randomListEntryNode": "Random Entry",
+    "imp_randomFileEntryNode": "Random File Entry",
     "imp_replaceListNode": "Replace List",
     "imp_sortListNode": "Sort List",
     "imp_splitListNode": "Split List",
+    "imp_stringToListNode": "String To List",
 
     "imp_incrementerNode": "Incrementer",
     "imp_processPathNameNode": "Process Path Name",
@@ -1879,10 +2101,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "imp_forceAspectOnBoundsNode": "Force Aspect On Bounds",
     "imp_selectBoundingBoxNode": "Select Bounding Box",
     "imp_getMaskBoundingBoxNode": "Get Mask Bounding Box",
+    "imp_searchReplaceNode": "Search and Replace",
 
     "imp_intToBoolNode": "Int to Boolean",
     "imp_stringToIntNode": "String to Int",
     "imp_isStringEmptyNode": "Is String Empty",
+    "imp_stringContainsNode": "Search To Boolean",
 
     "imp_randomizeImageBatchNode": "Randomize Image Batch",
 
