@@ -13,6 +13,21 @@ from io import BytesIO
 from PIL import Image
 import folder_paths
 
+
+# ===========================================================================
+
+
+
+
+
+# LIST MANAGEMENT
+
+
+
+
+
+# ===========================================================================
+
 class imp_listCountNode:
     def __init__(self):
         pass
@@ -280,6 +295,38 @@ class imp_randomizeListNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("randomized_list",)
     FUNCTION = "randomizeList"
+    CATEGORY = "🐝TinyBee/Lists"
+
+class imp_decorateListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string_list": ("STRING", {"forceInput": True}),
+                "prefix": ("STRING", {"default": "", "forceInput": False}),
+                "postfix": ("STRING", {"default": "", "forceInput": False}),
+                "search_string": ("STRING", {"default": "", "forceInput": False}),
+                "replace_string": ("STRING", {"default": "", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def decorateList(string_list, prefix, postfix, search_string, replace_string):
+        if not string_list:
+            return ([],)
+        decorated = [f"{prefix[0]}{item}{postfix[0]}" for item in string_list]
+        if search_string[0] and replace_string[0]:
+            decorated = [item.replace(search_string[0], replace_string[0]) for item in decorated]
+        return (decorated,)
+
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("decorated_list",)
+    FUNCTION = "decorateList"
     CATEGORY = "🐝TinyBee/Lists"
 
 # Split a list at the specified index into two lists
@@ -895,6 +942,20 @@ class imp_promptSplitterNode:
     OUTPUT_IS_LIST = (False, False, False, False, False, False, False, False, False, False)
     FUNCTION = "splitPrompt"
     CATEGORY = "🐝TinyBee/Util"
+
+# ===========================================================================
+
+
+
+
+
+# CASTING AND UTILITIES
+
+
+
+
+
+# ===========================================================================
 
 class imp_timestampNode:
     def __init__(self):
@@ -2036,10 +2097,10 @@ class imp_loadImageBatchFromZipNode:
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
-    "Filter List": imp_filterListNode,
     "Combine Lists": imp_combineListsNode,
-    "Replace List": imp_replaceListNode,
+    "Decorate List": imp_decorateListNode,
     "Filter Existing Files": imp_filterFileExistsListNode,
+    "Filter List": imp_filterListNode,
     "Filter Words": imp_filterWordsNode,
     "Get File List": imp_getFileListNode,
     "Get List From File": imp_getListFromFileNode,
@@ -2048,6 +2109,7 @@ NODE_CLASS_MAPPINGS = {
     "Random Entry": imp_randomListEntryNode,
     "Random File Entry": imp_randomFileEntryNode,
     "Randomize List": imp_randomizeListNode,
+    "Replace List": imp_replaceListNode,
     "Sort List": imp_sortListNode,
     "Split List": imp_splitListNode,
     "String To List": imp_stringToListNode,
@@ -2076,45 +2138,10 @@ NODE_CLASS_MAPPINGS = {
     "Json From Properties": imp_getJsonFromPropertiesNode,
 }
 
-# A dictionary that contains the friendly/humanly readable titles for the nodes
+# Auto-generate display name mappings from NODE_CLASS_MAPPINGS
+# Maps class name (e.g., "imp_combineListsNode") to display name (e.g., "Combine Lists")
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "imp_filterListNode": "Filter List",
-    "imp_combineListsNode": "Combine Lists",
-    "imp_filterWordsNode": "Filter Words",
-    "imp_filterFileExistsListNode": "Filter Existing Files",
-    "imp_getFileListNode": "Get File List",
-    "imp_getListFromFileNode": "Get List From File",
-    "imp_indexedListEntryNode": "Indexed Entry",
-    "imp_listCountNode": "List Count",
-    "imp_randomizeListNode": "Randomize List",
-    "imp_randomListEntryNode": "Random Entry",
-    "imp_randomFileEntryNode": "Random File Entry",
-    "imp_replaceListNode": "Replace List",
-    "imp_sortListNode": "Sort List",
-    "imp_splitListNode": "Split List",
-    "imp_stringToListNode": "String To List",
-
-    "imp_incrementerNode": "Incrementer",
-    "imp_processPathNameNode": "Process Path Name",
-    "imp_promptSplitterNode": "Prompt Splitter",
-    "imp_timestampNode": "Timestamp",
-    "imp_forceAspectOnBoundsNode": "Force Aspect On Bounds",
-    "imp_selectBoundingBoxNode": "Select Bounding Box",
-    "imp_getMaskBoundingBoxNode": "Get Mask Bounding Box",
-    "imp_searchReplaceNode": "Search and Replace",
-
-    "imp_intToBoolNode": "Int to Boolean",
-    "imp_stringToIntNode": "String to Int",
-    "imp_isStringEmptyNode": "Is String Empty",
-    "imp_stringContainsNode": "Search To Boolean",
-
-    "imp_randomizeImageBatchNode": "Randomize Image Batch",
-
-    "imp_saveImageBatchToZipNode": "Save Image Batch to Zip",
-    "imp_loadImageBatchFromZipNode": "Load Image Batch from Zip",
-    "imp_encodeAnyPropertyNode": "Encode Any Property",
-    "imp_combinePropertiesNode": "Combine Properties",
-    "imp_getPropertyFromPropertiesNode": "Prop From Properties",
-    "imp_getJsonFromPropertiesNode": "Json From Properties",
+    cls.__name__: display_name 
+    for display_name, cls in NODE_CLASS_MAPPINGS.items()
 }
 
