@@ -1532,6 +1532,161 @@ class imp_getMaskBoundingBoxNode:
 
         return (bbox_mask, x_min, y_min, width, height)
 
+class imp_faceBodyAspectBoundsNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "face_x": ("INT", {"default": 0, "min": -10000, "max": 10000}),
+                "face_y": ("INT", {"default": 0, "min": -10000, "max": 10000}),
+                "face_width": ("INT", {"default": 128, "min": 1, "max": 10000}),
+                "face_height": ("INT", {"default": 128, "min": 1, "max": 10000}),
+                "body_x": ("INT", {"default": 0, "min": -10000, "max": 10000}),
+                "body_y": ("INT", {"default": 0, "min": -10000, "max": 10000}),
+                "body_width": ("INT", {"default": 256, "min": 1, "max": 10000}),
+                "body_height": ("INT", {"default": 512, "min": 1, "max": 10000}),
+                "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+            }
+        }
+
+    @staticmethod
+    def faceBodyAspectBounds(face_x, face_y, face_width, face_height,
+                             body_x, body_y, body_width, body_height,
+                             aspect_ratio):
+        # We have a body bounding box, and a face bounding box within it.
+        # The face box is relative to the body box's x and y (top left corner).
+        # We want to adjust the body box to the desired aspect ratio, while ensuring
+        # the face box remains fully inside the new body box.
+        # We do NOT want to change the body_height, only the width.
+        # If we can, we will center the new bounding box around the face box.
+        # It is fine if we need to shift the body box's x or grow it's width
+        # to ensure the face box fits.
+        
+        # Calculate the new width based on the desired aspect ratio and body height
+        new_width = body_height * aspect_ratio
+        
+        # Calculate the absolute position of the face box
+        abs_face_x = body_x + face_x
+        abs_face_right = abs_face_x + face_width
+        
+        # Calculate the center of the face box
+        face_center_x = abs_face_x + (face_width / 2.0)
+        
+        # Try to center the new body box around the face center
+        new_body_x = face_center_x - (new_width / 2.0)
+        
+        # Ensure the face box is fully contained within the new body box
+        # Check if face left edge is inside
+        if abs_face_x < new_body_x:
+            new_body_x = abs_face_x
+        
+        # Check if face right edge is inside
+        if abs_face_right > (new_body_x + new_width):
+            new_body_x = abs_face_right - new_width
+
+        # Calculate the new face bounding box (relative to the new body position)
+        # Since face box is relative to body box, we need to adjust face_x based on body_x change
+        new_face_x = abs_face_x - new_body_x
+        new_face_y = face_y  # y position doesn't change since body_y doesn't change
+        
+        # Adjust face dimensions to match the aspect ratio
+        # Only grow the box, never shrink it - grow in all directions evenly
+        new_face_width = face_width
+        new_face_height = face_height
+        
+        # Calculate what the dimensions should be based on aspect ratio
+        # Try width-based calculation first
+        width_based_height = face_width / aspect_ratio
+        # Try height-based calculation
+        height_based_width = face_height * aspect_ratio
+        
+        # Choose the approach that grows (or maintains) the box
+        if width_based_height >= face_height:
+            # Growing height based on current width satisfies "don't shrink"
+            new_face_height = width_based_height
+        else:
+            # Need to grow width to match aspect ratio without shrinking height
+            new_face_width = height_based_width
+
+        # Calculate the amount of growth needed in each dimension
+        width_growth = new_face_width - face_width
+        height_growth = new_face_height - face_height
+        
+        # Calculate the absolute position of the current face box
+        abs_face_y = body_y + face_y
+        abs_face_bottom = abs_face_y + face_height
+        
+        # Calculate the center of the face box
+        face_center_y = abs_face_y + (face_height / 2.0)
+        
+        # Try to grow evenly in all directions (half growth on each side)
+        # For horizontal growth
+        left_growth = width_growth / 2.0
+        right_growth = width_growth / 2.0
+        
+        # For vertical growth
+        top_growth = height_growth / 2.0
+        bottom_growth = height_growth / 2.0
+        
+        # Check constraints against body box and adjust growth distribution
+        # Horizontal constraints
+        new_face_left = abs_face_x - left_growth
+        new_face_right = abs_face_x + face_width + right_growth
+        
+        # If we exceed body box on the left, shift growth to the right
+        if new_face_left < body_x:
+            excess = body_x - new_face_left
+            left_growth -= excess
+            right_growth += excess
+            new_face_left = body_x
+            new_face_right = abs_face_x + face_width + right_growth
+        
+        # If we exceed body box on the right, shift growth to the left
+        if new_face_right > (body_x + body_width):
+            excess = new_face_right - (body_x + body_width)
+            right_growth -= excess
+            left_growth += excess
+            new_face_right = body_x + body_width
+            new_face_left = abs_face_x - left_growth
+        
+        # Vertical constraints
+        new_face_top = abs_face_y - top_growth
+        new_face_bottom = abs_face_y + face_height + bottom_growth
+        
+        # If we exceed body box on the top, shift growth to the bottom
+        if new_face_top < body_y:
+            excess = body_y - new_face_top
+            top_growth -= excess
+            bottom_growth += excess
+            new_face_top = body_y
+            new_face_bottom = abs_face_y + face_height + bottom_growth
+        
+        # If we exceed body box on the bottom, shift growth to the top
+        if new_face_bottom > (body_y + body_height):
+            excess = new_face_bottom - (body_y + body_height)
+            bottom_growth -= excess
+            top_growth += excess
+            new_face_bottom = body_y + body_height
+            new_face_top = abs_face_y - top_growth
+        
+        # Calculate final face box position and dimensions
+        final_abs_face_x = abs_face_x - left_growth
+        final_abs_face_y = abs_face_y - top_growth
+        final_face_width = face_width + left_growth + right_growth
+        final_face_height = face_height + top_growth + bottom_growth
+        
+        # Return absolute coordinates for face box (not relative to body box)
+        return (int(round(new_body_x)), int(round(body_y)), int(round(new_width)), int(round(body_height)), 
+                int(round(final_abs_face_x)), int(round(final_abs_face_y)), int(round(final_face_width)), int(round(final_face_height)))
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("body_x", "body_y", "body_width", "body_height", "face_x", "face_y", "face_width", "face_height")
+    FUNCTION = "faceBodyAspectBounds"
+    CATEGORY = "🐝TinyBee/Util"
+
 CASE_MATCH_TYPES = ["case sensitive", "case insensitive", "match case"]
 class imp_searchReplaceNode:
     def __init__(self):
@@ -1757,6 +1912,7 @@ class AlwaysEqualProxy(str):
 
     def __ne__(self, _):
         return False
+    
 generic_type = AlwaysEqualProxy("*")
 
 class imp_encodeAnyPropertyNode:
@@ -1768,7 +1924,7 @@ class imp_encodeAnyPropertyNode:
         return {
             "required": {
                 "property_name": ("STRING", {"default": "property"}),
-                "property_value": (generic_type,),
+                "property_value": (generic_type,),  
                 "property_type": (PROPVALUETYPES, {"default": "UNKNOWN", "forceInput": False}),
             }
         }
@@ -2121,6 +2277,7 @@ NODE_CLASS_MAPPINGS = {
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
+    "Face Body Aspect Bounds": imp_faceBodyAspectBoundsNode,
     "Search and Replace": imp_searchReplaceNode,
 
     "Int to Boolean": imp_intToBoolNode,
