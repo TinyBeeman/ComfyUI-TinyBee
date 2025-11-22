@@ -833,10 +833,18 @@ class imp_processPathNameNode:
         full_path = os.path.abspath(path)
         path_only, file_name = os.path.split(full_path)
         file_name_base, file_name_ext = os.path.splitext(file_name)
-        return (full_path, path_only, file_name_base, file_name_ext)
+        # A filename might have a tag, which is all the characters before the first - or _ or integer.
+        tag_name = ""
+        for i, char in enumerate(file_name_base):
+            if char in ['-', '_'] or char.isdigit():
+                tag_name = file_name_base[:i]
+                break
+        if not tag_name:
+            tag_name = file_name_base
+        return (full_path, path_only, file_name_base, file_name_ext, tag_name)
 
-    RETURN_TYPES = ("STRING","STRING","STRING","STRING")
-    RETURN_NAMES = ("full_path","path_only","file_name_base","file_name_ext")
+    RETURN_TYPES = ("STRING","STRING","STRING","STRING","STRING")
+    RETURN_NAMES = ("full_path","path_only","file_name_base","file_name_ext","tag_name")
     FUNCTION = "processPathName"
     CATEGORY = "🐝TinyBee/Util"
 
