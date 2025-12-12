@@ -56,17 +56,23 @@ class TinyFolderStructure:
     def __init__(self, path):
         self.path = path
         self.subfolders = []
+        self.direct_files = []  # Files directly in this folder
 
     def populateSubfolders(self, file_list):
         # file_list is a list of files with paths.
         # First let's remove any files that are not under self.path
         relevant_files = [f for f in file_list if f.startswith(self.path)]
-        # Now create a set of unique subfolders
+        
+        # Separate files into direct files and files in subfolders
         subfolder_set = set()
         for file_path in relevant_files:
             rel_path = os.path.relpath(file_path, self.path)
             parts = rel_path.split(os.sep)
-            if len(parts) > 1:
+            if len(parts) == 1:
+                # File is directly in this folder
+                self.direct_files.append(file_path)
+            else:
+                # File is in a subfolder
                 subfolder = parts[0]
                 subfolder_set.add(subfolder)
 
@@ -77,6 +83,9 @@ class TinyFolderStructure:
 
     def getSubfolders(self):
         return self.subfolders
+    
+    def getDirectFiles(self):
+        return self.direct_files
 
 class imp_randomFileEntryNode:
     def __init__(self):
@@ -90,7 +99,7 @@ class imp_randomFileEntryNode:
                 "file_list": ("STRING", {"forceInput": True}),
             },
             "optional": {
-                "even_chance_depth": ("INT", {"default": 0, "forceInput": False, "help": "If > 0, will randomly choose from subfolders to that level of depth, -1 for all levels"}),
+                "even_chance_depth": ("INT", {"default": -1, "min": -1, "max": 100, "forceInput": False, "help": "If > 0, will randomly choose from subfolders to that level of depth, -1 for all levels"}),
             }
         }
     
@@ -121,19 +130,60 @@ class imp_randomFileEntryNode:
         folder_structure = TinyFolderStructure(common_root)
         folder_structure.populateSubfolders(file_list)
 
+        # Navigate to the target depth or as deep as possible
         current_folder = folder_structure
         depth = 0
-        while True:
+        
+        if depth_value == -1:
+            # For depth -1, navigate randomly to any depth
+            while True:
+                subfolders = current_folder.getSubfolders()
+                if not subfolders:
+                    break
+                current_folder = random.choice(subfolders)
+                print(f"Random folder at depth {depth + 1}: {current_folder.path}")
+                depth += 1
+            # Pick from all files at this final location
+            final_files = [f for f in file_list if f.startswith(current_folder.path)]
+        else:
+            # Navigate to the specified depth
+            while depth < depth_value:
+                subfolders = current_folder.getSubfolders()
+                if not subfolders:
+                    # Can't go deeper, stop here
+                    break
+                current_folder = random.choice(subfolders)
+                print(f"Navigating to depth {depth + 1}: {current_folder.path}")
+                depth += 1
+            
+            # Now at target depth, create buckets:
+            # - One bucket for direct files in current_folder (if any)
+            # - One bucket for each subfolder (containing all its descendants)
+            buckets = []
+            
+            # Bucket for direct files
+            direct_files = current_folder.getDirectFiles()
+            if direct_files:
+                buckets.append(direct_files)
+                print(f"Bucket: {len(direct_files)} direct files in {current_folder.path}")
+            
+            # Bucket for each subfolder
             subfolders = current_folder.getSubfolders()
-            if not subfolders:
-                break
-            if depth_value != -1 and depth >= depth_value:
-                break
-            current_folder = random.choice(subfolders)
-            print(f"Random folder at depth {depth + 1}: {current_folder.path}")
-            depth += 1
-
-        final_files = [f for f in file_list if f.startswith(current_folder.path)]
+            for subfolder in subfolders:
+                subfolder_files = [f for f in file_list if f.startswith(subfolder.path)]
+                if subfolder_files:
+                    buckets.append(subfolder_files)
+                    print(f"Bucket: {len(subfolder_files)} files in {subfolder.path}")
+            
+            # If no buckets were created, fall back to all files from current folder
+            if not buckets:
+                final_files = [f for f in file_list if f.startswith(current_folder.path)]
+            else:
+                # Randomly select one bucket with equal probability
+                selected_bucket = random.choice(buckets)
+                final_files = selected_bucket
+                print(f"Selected bucket with {len(final_files)} files")
+        
         if final_files:
             return (random.choice(final_files),)
         
@@ -1745,7 +1795,40 @@ class imp_searchReplaceNode:
     FUNCTION = "searchReplace"
     CATEGORY = "🐝TinyBee/Util"
 
+class imp_iterateSeedNode:
+    def __init__(self):
+        pass
 
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "init_seed": ("INT", {"default": 0, "min": -1, "max": 2147483647, "forceInput": True}),
+                "method": (["increment", "random"], {"default": "increment", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def iterateSeed(init_seed, method="increment"):
+        """Increment the seed by 1, wrapping around if exceeding max int."""
+        new_seed = init_seed
+        if method == "random":
+            random.seed(init_seed)
+            new_seed = random.randint(-2147483648, 2147483647)
+            return (new_seed,)
+        else:  # increment
+            if init_seed == -1:
+                new_seed = -1
+            else:
+                new_seed = init_seed + 1
+                if new_seed > 2147483647:
+                    new_seed = 0
+        return (new_seed,)
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("new_seed",)
+    FUNCTION = "iterateSeed"
+    CATEGORY = "🐝TinyBee/Util"
 
 class imp_intToBoolNode:
     def __init__(self):
@@ -1851,6 +1934,144 @@ class imp_stringContainsNode:
     RETURN_NAMES = ("contains",)
     FUNCTION = "stringContains"
     CATEGORY = "🐝TinyBee/Casting"
+
+class imp_noneImgConstNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+            }
+        }
+
+    @staticmethod
+    def noneConst():
+        """Return a None constant."""
+        return (None,)
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("none",)
+    FUNCTION = "noneConst"
+    CATEGORY = "🐝TinyBee/Casting"
+
+class imp_interpolateFramesNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frame_count": ("INT", {"default": 10, "min": 0, "max": 1000}),
+                "include_begin": ("BOOLEAN", {"default": True, "label_on": "Include Begin", "label_off": "Exclude Begin"}),
+                "include_end": ("BOOLEAN", {"default": True, "label_on": "Include End", "label_off": "Exclude End"}),
+            },
+            "optional": {
+                "begin_image": ("IMAGE", {"default": None}),
+                "end_image": ("IMAGE", {"default": None}),
+            }
+        }
+
+    @staticmethod
+    def interpolateFrames(frame_count, include_begin, include_end, begin_image=None, end_image=None):
+        """
+        Interpolate frames between two images.
+        
+        Args:
+            frame_count: Number of interpolated frames (not including begin/end)
+            include_begin: Whether to include the beginning image
+            include_end: Whether to include the ending image
+            begin_image: Starting image (optional)
+            end_image: Ending image (optional)
+        
+        Returns:
+            A batch of interpolated frames as a torch tensor
+        """
+        # Validate that at least one image is provided
+        if begin_image is None and end_image is None:
+            raise ValueError("At least one image (begin_image or end_image) must be provided")
+        
+        # Normalize images to torch tensors
+        def normalize_image(img):
+            if img is None:
+                return None
+            if isinstance(img, np.ndarray):
+                return torch.from_numpy(img)
+            elif isinstance(img, torch.Tensor):
+                return img
+            elif isinstance(img, list):
+                return torch.stack([torch.tensor(i) if not isinstance(i, torch.Tensor) else i for i in img])
+            else:
+                return torch.tensor(img)
+        
+        begin_tensor = normalize_image(begin_image)
+        end_tensor = normalize_image(end_image)
+        
+        # If begin_tensor is a batch, use only the first image
+        if begin_tensor is not None and begin_tensor.dim() == 4:
+            begin_tensor = begin_tensor[0]
+        
+        # If end_tensor is a batch, use only the first image
+        if end_tensor is not None and end_tensor.dim() == 4:
+            end_tensor = end_tensor[0]
+        
+        # Determine image dimensions
+        if begin_tensor is not None:
+            height, width, channels = begin_tensor.shape
+            device = begin_tensor.device
+            dtype = begin_tensor.dtype
+        else:
+            height, width, channels = end_tensor.shape
+            device = end_tensor.device
+            dtype = end_tensor.dtype
+        
+        # Create black images for missing begin/end
+        if begin_tensor is None:
+            begin_tensor = torch.zeros((height, width, channels), dtype=dtype, device=device)
+        
+        if end_tensor is None:
+            end_tensor = torch.zeros((height, width, channels), dtype=dtype, device=device)
+        
+        # Ensure both images have the same dimensions
+        if begin_tensor.shape != end_tensor.shape:
+            raise ValueError(f"Image dimensions must match. Begin: {begin_tensor.shape}, End: {end_tensor.shape}")
+        
+        # Build the frame list
+        frames = []
+        
+        # Add begin image if requested
+        if include_begin:
+            frames.append(begin_tensor)
+        
+        # Generate interpolated frames
+        if frame_count > 0:
+            for i in range(1, frame_count + 1):
+                # Calculate interpolation factor (0 to 1)
+                alpha = i / (frame_count + 1)
+                
+                # Linear interpolation between begin and end
+                interpolated = (1 - alpha) * begin_tensor + alpha * end_tensor
+                frames.append(interpolated)
+        
+        # Add end image if requested
+        if include_end:
+            frames.append(end_tensor)
+        
+        # If no frames to return, return at least the begin image
+        if len(frames) == 0:
+            frames.append(begin_tensor)
+        
+        # Stack frames into a batch
+        frame_batch = torch.stack(frames)
+        
+        return (frame_batch,)
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("frames",)
+    FUNCTION = "interpolateFrames"
+    CATEGORY = "🐝TinyBee/Video"
 
 # ===========================================================================
 
@@ -2261,6 +2482,7 @@ class imp_loadImageBatchFromZipNode:
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
+    # List Nodes
     "Combine Lists": imp_combineListsNode,
     "Decorate List": imp_decorateListNode,
     "Filter Existing Files": imp_filterFileExistsListNode,
@@ -2278,6 +2500,7 @@ NODE_CLASS_MAPPINGS = {
     "Split List": imp_splitListNode,
     "String To List": imp_stringToListNode,
 
+    # Utility Nodes
     "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
     "Prompt Splitter": imp_promptSplitterNode,
@@ -2287,20 +2510,25 @@ NODE_CLASS_MAPPINGS = {
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
     "Face Body Aspect Bounds": imp_faceBodyAspectBoundsNode,
     "Search and Replace": imp_searchReplaceNode,
+    "Iterate Seed": imp_iterateSeedNode,
 
+    # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
     "String to Int": imp_stringToIntNode,
     "Is String Empty": imp_isStringEmptyNode,
     "Search To Boolean": imp_stringContainsNode,
+    "None Image": imp_noneImgConstNode,
 
+    # Workflow Nodes
     "Randomize Image Batch": imp_randomizeImageBatchNode,
-
     "Save Image Batch to Zip": imp_saveImageBatchToZipNode,
     "Load Image Batch from Zip": imp_loadImageBatchFromZipNode,
     "Encode Any Property": imp_encodeAnyPropertyNode,
     "Combine Properties": imp_combinePropertiesNode,
     "Prop From Properties": imp_getPropertyFromPropertiesNode,
     "Json From Properties": imp_getJsonFromPropertiesNode,
+
+    "Interpolate Frames": imp_interpolateFramesNode,
 }
 
 # Auto-generate display name mappings from NODE_CLASS_MAPPINGS
