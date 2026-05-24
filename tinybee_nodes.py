@@ -58,6 +58,10 @@ class TinyFolderStructure:
         self.subfolders = []
         self.direct_files = []  # Files directly in this folder
 
+    @staticmethod
+    def _is_ignored_folder_name(folder_name):
+        return str(folder_name).lower() == "_ignore"
+
     def populateSubfolders(self, file_list):
         # file_list is a list of files with paths.
         # First let's remove any files that are not under self.path
@@ -74,6 +78,8 @@ class TinyFolderStructure:
             else:
                 # File is in a subfolder
                 subfolder = parts[0]
+                if TinyFolderStructure._is_ignored_folder_name(subfolder):
+                    continue
                 subfolder_set.add(subfolder)
 
         self.subfolders = [TinyFolderStructure(os.path.join(self.path, subfolder)) for subfolder in subfolder_set]
@@ -95,7 +101,7 @@ class imp_randomFileEntryNode:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff, "control_after_generate": True}),
                 "file_list": ("STRING", {"forceInput": True}),
             },
             "optional": {
@@ -105,6 +111,11 @@ class imp_randomFileEntryNode:
     
     @staticmethod
     def getRandomFileEntry(seed, file_list, even_chance_depth=0):
+        def is_in_ignored_dir(file_path):
+            normalized = os.path.normpath(file_path)
+            path_parts = normalized.split(os.sep)
+            return any(part.lower() == "_ignore" for part in path_parts if part)
+
         # Fix: Access list parameters consistently
         seed_value = seed[0] if isinstance(seed, list) else seed
         depth_value = even_chance_depth[0] if isinstance(even_chance_depth, list) else even_chance_depth
@@ -117,18 +128,22 @@ class imp_randomFileEntryNode:
         if len(file_list) <= 0:
             return ("",)
 
+        non_ignored_files = [f for f in file_list if not is_in_ignored_dir(f)]
+        if len(non_ignored_files) <= 0:
+            return ("",)
+
         if depth_value == 0:
-            return (random.choice(file_list),)
+            return (random.choice(non_ignored_files),)
         
         # Fix: Handle potential commonpath error
         try:
-            common_root = os.path.commonpath(file_list)
+            common_root = os.path.commonpath(non_ignored_files)
         except ValueError:
             # Fallback if paths are on different drives
-            return (random.choice(file_list),)
+            return (random.choice(non_ignored_files),)
         
         folder_structure = TinyFolderStructure(common_root)
-        folder_structure.populateSubfolders(file_list)
+        folder_structure.populateSubfolders(non_ignored_files)
 
         # Navigate to the target depth or as deep as possible
         current_folder = folder_structure
@@ -144,10 +159,19 @@ class imp_randomFileEntryNode:
                 print(f"Random folder at depth {depth + 1}: {current_folder.path}")
                 depth += 1
             # Pick from all files at this final location
-            final_files = [f for f in file_list if f.startswith(current_folder.path)]
+            final_files = [f for f in non_ignored_files if f.startswith(current_folder.path)]
         else:
-            # Navigate to the specified depth
+            # Navigate to the specified depth, collecting a bucket for direct files
+            # at each intermediate level so they aren't excluded from selection.
+            buckets = []
+
             while depth < depth_value:
+                # Files directly in the current folder get their own bucket
+                level_direct = current_folder.getDirectFiles()
+                if level_direct:
+                    buckets.append(level_direct)
+                    print(f"Bucket (depth {depth}): {len(level_direct)} direct files in {current_folder.path}")
+
                 subfolders = current_folder.getSubfolders()
                 if not subfolders:
                     # Can't go deeper, stop here
@@ -155,29 +179,23 @@ class imp_randomFileEntryNode:
                 current_folder = random.choice(subfolders)
                 print(f"Navigating to depth {depth + 1}: {current_folder.path}")
                 depth += 1
-            
-            # Now at target depth, create buckets:
-            # - One bucket for direct files in current_folder (if any)
-            # - One bucket for each subfolder (containing all its descendants)
-            buckets = []
-            
-            # Bucket for direct files
+
+            # At target depth: one bucket for direct files, one per subfolder
             direct_files = current_folder.getDirectFiles()
             if direct_files:
                 buckets.append(direct_files)
-                print(f"Bucket: {len(direct_files)} direct files in {current_folder.path}")
-            
-            # Bucket for each subfolder
+                print(f"Bucket (depth {depth}): {len(direct_files)} direct files in {current_folder.path}")
+
             subfolders = current_folder.getSubfolders()
             for subfolder in subfolders:
-                subfolder_files = [f for f in file_list if f.startswith(subfolder.path)]
+                subfolder_files = [f for f in non_ignored_files if f.startswith(subfolder.path)]
                 if subfolder_files:
                     buckets.append(subfolder_files)
                     print(f"Bucket: {len(subfolder_files)} files in {subfolder.path}")
             
             # If no buckets were created, fall back to all files from current folder
             if not buckets:
-                final_files = [f for f in file_list if f.startswith(current_folder.path)]
+                final_files = [f for f in non_ignored_files if f.startswith(current_folder.path)]
             else:
                 # Randomly select one bucket with equal probability
                 selected_bucket = random.choice(buckets)
@@ -189,7 +207,7 @@ class imp_randomFileEntryNode:
         
         print("Error: No files found in selected folder depth.")
         # Safer fallback
-        return (random.choice(file_list) if file_list else "",)
+        return (random.choice(non_ignored_files) if non_ignored_files else "",)
 
     INPUT_IS_LIST = True
     RETURN_TYPES = ("STRING",)
@@ -206,7 +224,7 @@ class imp_randomListEntryNode:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff, "control_after_generate": True}),
                 "string_list": ("STRING", {"forceInput": True}),
             }
         }
@@ -827,11 +845,33 @@ class imp_getFileListNode:
             },
             "optional": {
                 "allowed_extensions": ("STRING", {"default": ".jpeg,.jpg,.png,.tiff,.gif,.bmp,.webp"}),
+                "dest_path": ("STRING", {"default": "", "forceInput": False})
             }
         }
 
     @staticmethod
-    def getFileList(path, glob_pattern, sort_method, sort_ascending, seed, allowed_extensions=None):
+    def is_allowed(filepath, allowed_extensions, dest_path):
+        if (dest_path and dest_path.strip() != ""):
+            # We want to see if the file's name (without extension) matches any file in dest_path with the same base name (diffeent extension is okay)
+            base_name = os.path.splitext(os.path.basename(filepath))[0]
+            # Normalize dest_path to handle path separators correctly
+            normalized_dest = os.path.normpath(dest_path)
+            dest_pattern = os.path.join(normalized_dest, base_name + "*")
+            dest_files = glob.glob(dest_pattern)
+            if dest_files:
+                return False
+
+        if allowed_extensions is None or allowed_extensions.strip() == "":
+            return True
+        allowed = [ext.strip().lower() for ext in allowed_extensions.split(',') if ext.strip()]
+        if not allowed:
+            return True
+        if any(filepath.lower().endswith(ext) for ext in allowed):
+            return True
+        return False
+
+    @staticmethod
+    def getFileList(path, glob_pattern, sort_method, sort_ascending, seed, allowed_extensions=None, dest_path=""):
         # allowed_extensions: comma-separated string
         if allowed_extensions is None or allowed_extensions.strip() == "":
             allowed = []
@@ -839,8 +879,8 @@ class imp_getFileListNode:
             allowed = [ext.strip().lower() for ext in allowed_extensions.split(',') if ext.strip()]
         pattern = path.rstrip("/\\") + "/" + glob_pattern
         files = glob.glob(pattern, recursive=True)
-        if (len(allowed) > 0):
-            filtered = [f for f in files if any(f.lower().endswith(ext) for ext in allowed)]
+        if (len(allowed) > 0 or (dest_path and dest_path.strip() != "")):
+            filtered = [f for f in files if imp_getFileListNode.is_allowed(f, allowed_extensions, dest_path)]
         else:
             filtered = files
 
@@ -1644,6 +1684,10 @@ class imp_faceBodyAspectBoundsNode:
         # Check if face right edge is inside
         if abs_face_right > (new_body_x + new_width):
             new_body_x = abs_face_right - new_width
+        
+        # Prevent body_x from going negative (assuming 0 is the left edge of the image)
+        if new_body_x < 0:
+            new_body_x = 0
 
         # Calculate the new face bounding box (relative to the new body position)
         # Since face box is relative to body box, we need to adjust face_x based on body_x change
