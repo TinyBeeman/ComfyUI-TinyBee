@@ -1041,6 +1041,97 @@ class imp_promptSplitterNode:
     FUNCTION = "splitPrompt"
     CATEGORY = "🐝TinyBee/Util"
 
+
+class imp_promptSplitterDynamicNode:
+    MAX_PROMPT_PAIRS = 32
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prefix_all": ("STRING", {"default": "", "multiline": False, "forceInput": False}),
+                "prompts": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "postfix_all": ("STRING", {"default": "", "multiline": False, "forceInput": False}),
+                "search_string": ("STRING", {"default": "", "forceInput": False}),
+                "replace_string": ("STRING", {"default": "", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def _parse_prompt_entries(prefix_all, prompts, postfix_all, search_string, replace_string):
+        entries = []
+        current_prompt = ""
+        current_negs = []
+
+        def finalize_entry():
+            nonlocal current_prompt, current_negs
+            if not current_prompt:
+                return
+
+            prompt_text = current_prompt.strip()
+            neg_text = ", ".join(n for n in current_negs if n)
+
+            if prefix_all.strip():
+                prompt_text = f"{prefix_all.strip()} {prompt_text}" if prompt_text else prefix_all.strip()
+            if postfix_all.strip():
+                prompt_text = f"{prompt_text} {postfix_all.strip()}" if prompt_text else postfix_all.strip()
+            if search_string:
+                prompt_text = prompt_text.replace(search_string, replace_string)
+                neg_text = neg_text.replace(search_string, replace_string)
+
+            entries.append((prompt_text or "", neg_text or ""))
+            current_prompt = ""
+            current_negs = []
+
+        for raw_line in prompts.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.lower().startswith("neg:"):
+                if current_prompt:
+                    neg_text = line[4:].strip()
+                    if neg_text:
+                        current_negs.append(neg_text)
+                else:
+                    logging.warning(f"Negative prompt found before any positive prompt: {line}")
+                continue
+
+            finalize_entry()
+            current_prompt = line
+
+        finalize_entry()
+        return entries
+
+    @staticmethod
+    def splitPrompt(prefix_all, prompts, postfix_all, search_string, replace_string):
+        entries = imp_promptSplitterDynamicNode._parse_prompt_entries(
+            prefix_all, prompts, postfix_all, search_string, replace_string
+        )
+
+        max_pairs = imp_promptSplitterDynamicNode.MAX_PROMPT_PAIRS
+        padded_entries = entries[:max_pairs]
+        while len(padded_entries) < max_pairs:
+            padded_entries.append(("", ""))
+
+        outputs = []
+        for prompt_text, neg_text in padded_entries:
+            outputs.extend([prompt_text, neg_text])
+
+        return tuple(outputs)
+
+    RETURN_TYPES = tuple(["STRING", "STRING"] * MAX_PROMPT_PAIRS)
+    RETURN_NAMES = tuple(
+        name
+        for index in range(1, MAX_PROMPT_PAIRS + 1)
+        for name in (f"prompt{index}", f"neg{index}")
+    )
+    OUTPUT_IS_LIST = tuple([False] * (MAX_PROMPT_PAIRS * 2))
+    FUNCTION = "splitPrompt"
+    CATEGORY = "🐝TinyBee/Util"
+
 # ===========================================================================
 
 
@@ -2548,6 +2639,7 @@ NODE_CLASS_MAPPINGS = {
     "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
     "Prompt Splitter": imp_promptSplitterNode,
+    "Prompt Splitter (Dynamic)": imp_promptSplitterDynamicNode,
     "Timestamp": imp_timestampNode,
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
