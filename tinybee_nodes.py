@@ -5,6 +5,7 @@ import re
 import json
 import logging
 import datetime
+import threading
 from time import time
 import numpy as np
 import torch
@@ -12,6 +13,43 @@ import zipfile
 from io import BytesIO
 from PIL import Image
 import folder_paths
+
+
+TINYBEE_IMAGE_VARIABLES = {}
+TINYBEE_IMAGE_VARIABLES_LOCK = threading.Lock()
+
+
+def _parse_variable_names(raw_variable_names):
+    """Parse variable names by splitting on any non-word delimiters.
+
+    Uses the same core delimiter strategy as the frontend extension: /[^\w]+/.
+    Empty tokens are discarded.
+    """
+    text = "" if raw_variable_names is None else str(raw_variable_names)
+    return [token for token in re.split(r"[^\w]+", text) if token]
+
+
+def _normalize_image_batch(images):
+    """Normalize possible IMAGE input shapes/types to a 4D torch batch [B, H, W, C]."""
+    if images is None:
+        return torch.zeros((0, 0, 0, 0), dtype=torch.float32)
+
+    if isinstance(images, torch.Tensor):
+        batch = images
+    elif isinstance(images, np.ndarray):
+        batch = torch.from_numpy(images)
+    elif isinstance(images, list):
+        if len(images) == 0:
+            return torch.zeros((0, 0, 0, 0), dtype=torch.float32)
+        normalized = [img if isinstance(img, torch.Tensor) else torch.tensor(img) for img in images]
+        batch = torch.stack(normalized, dim=0)
+    else:
+        batch = torch.tensor(images)
+
+    if batch.dim() == 3:
+        batch = batch.unsqueeze(0)
+
+    return batch
 
 
 # ===========================================================================
@@ -1225,6 +1263,166 @@ class imp_randomizeImageBatchNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("randomized_image_batch",)
     FUNCTION = "randomizeImageBatch"
+    CATEGORY = "🐝TinyBee/Images"
+
+
+class imp_setVarsFromBatchNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"forceInput": True}),
+                "variable_names": (
+                    "STRING",
+                    {
+                        "default": "var1, var2, var3",
+                        "multiline": False,
+                        "forceInput": False,
+                    },
+                ),
+            }
+        }
+
+    @staticmethod
+    def setVarsFromBatch(images, variable_names):
+        parsed_variables = _parse_variable_names(variable_names)
+        image_batch = _normalize_image_batch(images)
+        provided_count = int(image_batch.shape[0]) if image_batch.dim() > 0 else 0
+        expected_count = len(parsed_variables)
+
+        if provided_count < expected_count:
+            raise ValueError(
+                "Set Vars From Batch requires at least "
+                f"{expected_count} image(s) for parsed variables {parsed_variables}, "
+                f"but only received {provided_count}."
+            )
+
+        with TINYBEE_IMAGE_VARIABLES_LOCK:
+            for idx, variable_name in enumerate(parsed_variables):
+                # Store each variable as a 1-image IMAGE batch for direct downstream compatibility.
+                TINYBEE_IMAGE_VARIABLES[variable_name] = image_batch[idx:idx + 1].clone()
+
+        return (images, expected_count)
+
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("images", "assigned_count")
+    FUNCTION = "setVarsFromBatch"
+    CATEGORY = "🐝TinyBee/Images"
+
+
+class imp_getVariableImageNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def _available_names(cls):
+        with TINYBEE_IMAGE_VARIABLES_LOCK:
+            names = sorted(TINYBEE_IMAGE_VARIABLES.keys())
+        return names if names else [""]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "variable_name": (cls._available_names(), {"default": ""}),
+            },
+            "optional": {
+                "fallback_image": ("IMAGE", {"forceInput": True}),
+            },
+        }
+
+    @staticmethod
+    def getVariableImage(variable_name, fallback_image=None):
+        with TINYBEE_IMAGE_VARIABLES_LOCK:
+            stored = TINYBEE_IMAGE_VARIABLES.get(variable_name)
+            available = sorted(TINYBEE_IMAGE_VARIABLES.keys())
+
+        if stored is not None:
+            return (stored,)
+
+        if fallback_image is not None:
+            return (fallback_image,)
+
+        raise ValueError(
+            f"Get Variable could not find '{variable_name}'. "
+            f"Available variables: {available if available else 'none'}."
+        )
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "getVariableImage"
+    CATEGORY = "🐝TinyBee/Images"
+
+
+class imp_gridDividerNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "grid_image": ("IMAGE", {"forceInput": True}),
+                "cols": ("INT", {"default": 2, "min": 1, "max": 4096}),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 4096}),
+            }
+        }
+
+    @staticmethod
+    def divideGrid(grid_image, cols, rows):
+        if grid_image is None:
+            return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), 64, 64)
+
+        # Normalize to tensor in Comfy image format [B, H, W, C]
+        if isinstance(grid_image, np.ndarray):
+            grid_image = torch.from_numpy(grid_image)
+        elif not isinstance(grid_image, torch.Tensor):
+            if isinstance(grid_image, list):
+                grid_image = torch.stack([
+                    torch.tensor(img) if not isinstance(img, torch.Tensor) else img
+                    for img in grid_image
+                ])
+            else:
+                grid_image = torch.tensor(grid_image)
+
+        if grid_image.dim() == 3:
+            grid_image = grid_image.unsqueeze(0)
+
+        # Ensure values are plain ints if they are wrapped
+        if isinstance(cols, (list, tuple)):
+            cols = cols[0] if cols else 1
+        if isinstance(rows, (list, tuple)):
+            rows = rows[0] if rows else 1
+
+        cols = max(1, int(cols))
+        rows = max(1, int(rows))
+
+        _, image_height, image_width, _ = grid_image.shape
+        cell_width = max(1, image_width // cols)
+        cell_height = max(1, image_height // rows)
+
+        cells = []
+        for image in grid_image:
+            for r in range(rows):
+                y0 = r * cell_height
+                y1 = y0 + cell_height
+                for c in range(cols):
+                    x0 = c * cell_width
+                    x1 = x0 + cell_width
+                    cells.append(image[y0:y1, x0:x1, :])
+
+        if not cells:
+            return (torch.zeros((1, 64, 64, 3), dtype=torch.float32), cell_width, cell_height)
+
+        images = torch.stack(cells, dim=0)
+        return (images, cell_width, cell_height)
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT")
+    RETURN_NAMES = ("images", "cell_width", "cell_height")
+    FUNCTION = "divideGrid"
     CATEGORY = "🐝TinyBee/Images"
 
 class imp_forceAspectOnBoundsNode:
@@ -2656,7 +2854,10 @@ NODE_CLASS_MAPPINGS = {
     "None Image": imp_noneImgConstNode,
 
     # Workflow Nodes
+    "Grid Divider": imp_gridDividerNode,
     "Randomize Image Batch": imp_randomizeImageBatchNode,
+    "Set Vars From Batch": imp_setVarsFromBatchNode,
+    "Get Variable": imp_getVariableImageNode,
     "Save Image Batch to Zip": imp_saveImageBatchToZipNode,
     "Load Image Batch from Zip": imp_loadImageBatchFromZipNode,
     "Encode Any Property": imp_encodeAnyPropertyNode,
