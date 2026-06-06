@@ -91,11 +91,13 @@ function addResetButton(node) {
     return
   }
 
-  node.addWidget('button', 'Reset Prompts', 'reset_prompts', () => {
+  const onResetPrompts = () => {
     const promptsWidget = node.widgets?.find((widget) => widget.name === 'prompts')
     const entries = parsePromptEntries(promptsWidget?.value ?? '')
     syncPromptOutputs(node, entries.length)
-  })
+  }
+
+  node.addWidget('button', 'Reset Prompts', null, onResetPrompts, { serialize: false })
   node._tinybeeResetWidgetAdded = true
 }
 
