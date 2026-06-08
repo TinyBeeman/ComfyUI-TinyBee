@@ -3,6 +3,7 @@ import random
 import glob
 import re
 import json
+import csv as csvlib
 import hashlib
 import logging
 import datetime
@@ -10,7 +11,7 @@ from time import time
 import numpy as np
 import torch
 import zipfile
-from io import BytesIO
+from io import BytesIO, StringIO
 from PIL import Image
 import folder_paths
 
@@ -771,6 +772,132 @@ class imp_stringToListNode:
     RETURN_NAMES = ("list",)
     OUTPUT_IS_LIST = (True,)
     FUNCTION = "parseList"
+    CATEGORY = "🐝TinyBee/Lists"
+
+
+class imp_csvParserNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "csv": ("STRING", {"forceInput": True}),
+                "has_headers": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "delimiter": ("STRING", {"default": ",", "forceInput": False, "multiline": False}),
+            }
+        }
+
+    @staticmethod
+    def parseCsv(csv, has_headers, delimiter=","):
+        csv_text = _unwrap_single_value(csv)
+        has_headers_value = bool(_unwrap_single_value(has_headers))
+        delimiter_value = _unwrap_single_value(delimiter)
+
+        csv_text = "" if csv_text is None else str(csv_text)
+        delimiter_value = "," if delimiter_value is None else str(delimiter_value)
+        if delimiter_value == "":
+            delimiter_value = ","
+
+        # csv.reader requires a single-character delimiter.
+        parse_delimiter = delimiter_value[0]
+
+        rows_parsed = []
+        try:
+            reader = csvlib.reader(StringIO(csv_text), delimiter=parse_delimiter)
+            rows_parsed = [list(r) for r in reader]
+        except Exception:
+            # Fallback to a minimal splitter if parsing fails
+            rows_parsed = [line.split(delimiter_value) for line in csv_text.splitlines()]
+
+        # Keep row output as row strings joined by user-provided delimiter text.
+        row_strings = [delimiter_value.join(r) for r in rows_parsed]
+
+        if len(rows_parsed) == 0:
+            return ([], [], [])
+
+        if has_headers_value:
+            headers = [str(h) for h in rows_parsed[0]]
+            data_rows = rows_parsed[1:]
+        else:
+            data_rows = rows_parsed
+            max_cols = max((len(r) for r in data_rows), default=0)
+            headers = [str(i) for i in range(max_cols)]
+
+        max_cols = max(max((len(r) for r in data_rows), default=0), len(headers))
+        if not has_headers_value and len(headers) < max_cols:
+            headers = [str(i) for i in range(max_cols)]
+
+        dict_list = []
+        for row in data_rows:
+            entry = {}
+            for idx in range(max_cols):
+                value = row[idx] if idx < len(row) else ""
+                idx_key = str(idx)
+                entry[idx_key] = value
+
+                if idx < len(headers):
+                    header_key = str(headers[idx])
+                    entry[header_key] = value
+
+            dict_list.append(entry)
+
+        return (row_strings, dict_list, headers)
+
+    RETURN_TYPES = ("STRING", "OBJECT", "STRING")
+    RETURN_NAMES = ("rows", "dict_list", "headers")
+    OUTPUT_IS_LIST = (True, True, True)
+    FUNCTION = "parseCsv"
+    CATEGORY = "🐝TinyBee/Lists"
+
+
+class imp_dictionaryLookupNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dict": ("OBJECT", {"forceInput": True}),
+            },
+            "optional": {
+                "key": ("STRING", {"default": "", "forceInput": False, "multiline": False}),
+            }
+        }
+
+    @staticmethod
+    def lookupValue(dict, key=""):
+        dict_value = _unwrap_single_value(dict)
+        key_value = _unwrap_single_value(key)
+
+        if isinstance(dict_value, str):
+            try:
+                parsed = json.loads(dict_value)
+                dict_value = parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                dict_value = {}
+
+        if not isinstance(dict_value, dict):
+            dict_value = {}
+
+        key_strings = [str(k) for k in dict_value.keys()]
+
+        lookup = ""
+        if key_value is not None:
+            k = str(key_value)
+            if k != "" and k in dict_value:
+                lookup = str(dict_value.get(k, ""))
+
+        return (lookup, key_strings)
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("lookup", "keys")
+    OUTPUT_IS_LIST = (False, True)
+    FUNCTION = "lookupValue"
     CATEGORY = "🐝TinyBee/Lists"
 
 class imp_filterFileExistsListNode:
@@ -2923,8 +3050,10 @@ class imp_loadImageBatchFromZipNode:
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
     # List Nodes
+    "CSV Parser": imp_csvParserNode,
     "Combine Lists": imp_combineListsNode,
     "Decorate List": imp_decorateListNode,
+    "Dictionary Lookup": imp_dictionaryLookupNode,
     "Filter Existing Files": imp_filterFileExistsListNode,
     "Filter List": imp_filterListNode,
     "Filter Words": imp_filterWordsNode,
