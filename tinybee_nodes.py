@@ -1354,6 +1354,63 @@ class imp_timestampNode:
     FUNCTION = "getTimestamp"
     CATEGORY = "🐝TinyBee/Util"
 
+
+class imp_tinyRandomNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "min": ("FLOAT", {"default": 0.0, "step": 0.01}),
+                "max": ("FLOAT", {"default": 1.0, "step": 0.01}),
+                "power": ("INT", {"default": 1, "min": 1, "max": 10}),
+                "precision": ("INT", {"default": 3, "min": 0, "max": 15}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
+            }
+        }
+
+    @staticmethod
+    def getTinyRandom(min, max, power, precision, seed):
+        min_value = float(_unwrap_single_value(min))
+        max_value = float(_unwrap_single_value(max))
+        power_value = int(_unwrap_single_value(power))
+        precision_value = int(_unwrap_single_value(precision))
+        seed_value = int(_unwrap_single_value(seed))
+
+        if power_value < 1:
+            power_value = 1
+        if power_value > 10:
+            power_value = 10
+
+        if precision_value < 0:
+            precision_value = 0
+        if precision_value > 15:
+            precision_value = 15
+
+        rng = random.Random(seed_value)
+        values = [rng.uniform(min_value, max_value) for _ in range(power_value)]
+        avg_value = sum(values) / float(power_value)
+
+        rnd_float = round(avg_value, precision_value)
+        if rnd_float == 0:
+            rnd_float = 0.0
+        rnd_int = int(rnd_float)
+
+        rnd_str = f"{rnd_float:.{precision_value}f}" if precision_value > 0 else str(int(round(rnd_float)))
+        if precision_value > 0:
+            rnd_str = rnd_str.rstrip("0").rstrip(".")
+        if rnd_str == "-0":
+            rnd_str = "0"
+
+        return (rnd_int, rnd_float, rnd_str)
+
+    RETURN_TYPES = ("INT", "FLOAT", "STRING")
+    RETURN_NAMES = ("rnd_int", "rnd_float", "rnd_str")
+    FUNCTION = "getTinyRandom"
+    CATEGORY = "🐝TinyBee/Util"
+
 class imp_randomizeImageBatchNode:
     def __init__(self):
         pass
@@ -3075,6 +3132,7 @@ NODE_CLASS_MAPPINGS = {
     "Prompt Splitter": imp_promptSplitterNode,
     "Prompt Splitter (Dynamic)": imp_promptSplitterDynamicNode,
     "Timestamp": imp_timestampNode,
+    "Tiny Random": imp_tinyRandomNode,
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
