@@ -866,13 +866,15 @@ class imp_dictionaryLookupNode:
             },
             "optional": {
                 "key": ("STRING", {"default": "", "forceInput": False, "multiline": False}),
+                "default_value": ("STRING", {"default": "", "forceInput": False, "multiline": False}),
             }
         }
 
     @staticmethod
-    def lookupValue(dict, key=""):
+    def lookupValue(dict, key="", default_value=""):
         dict_value = _unwrap_single_value(dict)
         key_value = _unwrap_single_value(key)
+        default = _unwrap_single_value(default_value) or ""
 
         if isinstance(dict_value, str):
             try:
@@ -886,11 +888,11 @@ class imp_dictionaryLookupNode:
 
         key_strings = [str(k) for k in dict_value.keys()]
 
-        lookup = ""
+        lookup = default
         if key_value is not None:
             k = str(key_value)
             if k != "" and k in dict_value:
-                lookup = str(dict_value.get(k, ""))
+                lookup = str(dict_value.get(k, default))
 
         return (lookup, key_strings)
 
@@ -3103,6 +3105,60 @@ class imp_loadImageBatchFromZipNode:
 
 # ===========================================================================
 
+class imp_fileMetadataNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_path": ("STRING", {"default": "", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def getFileMetadata(image_path=""):
+        result = {}
+
+        if not image_path or not image_path.strip():
+            return (result,)
+
+        image_dir = os.path.dirname(image_path.strip())
+        image_basename = os.path.splitext(os.path.basename(image_path.strip()))[0]
+        folder_name = os.path.basename(image_dir)
+
+        # Load folder defaults first (lower priority)
+        defaults_path = os.path.join(image_dir, f"{folder_name}-defaults.json")
+        if os.path.isfile(defaults_path):
+            try:
+                with open(defaults_path, "r", encoding="utf-8") as f:
+                    defaults_data = json.load(f)
+                if isinstance(defaults_data, dict):
+                    result.update(defaults_data)
+            except Exception as e:
+                print(f"[File Metadata] Error reading defaults file {defaults_path}: {e}")
+
+        # Load image meta file second (takes precedence over defaults)
+        meta_path = os.path.join(image_dir, f"{image_basename}-meta.json")
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta_data = json.load(f)
+                if isinstance(meta_data, dict):
+                    result.update(meta_data)
+            except Exception as e:
+                print(f"[File Metadata] Error reading meta file {meta_path}: {e}")
+
+        return (result,)
+
+    RETURN_TYPES = ("OBJECT",)
+    RETURN_NAMES = ("metadata",)
+    OUTPUT_IS_LIST = (False,)
+    FUNCTION = "getFileMetadata"
+    CATEGORY = "🐝TinyBee/Lists"
+
+
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
@@ -3111,6 +3167,7 @@ NODE_CLASS_MAPPINGS = {
     "Combine Lists": imp_combineListsNode,
     "Decorate List": imp_decorateListNode,
     "Dictionary Lookup": imp_dictionaryLookupNode,
+    "File Metadata": imp_fileMetadataNode,
     "Filter Existing Files": imp_filterFileExistsListNode,
     "Filter List": imp_filterListNode,
     "Filter Words": imp_filterWordsNode,
