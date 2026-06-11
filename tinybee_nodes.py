@@ -2499,6 +2499,34 @@ class imp_stringToIntNode:
     FUNCTION = "stringToInt"
     CATEGORY = "🐝TinyBee/Casting"
 
+class imp_stringToFloatNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string": ("STRING", {"default": "0.0"}),
+                "ndigits": ("INT", {"default": -1, "min": -1, "max": 17}),
+            }
+        }
+
+    @staticmethod
+    def stringToFloat(string, ndigits):
+        try:
+            value = float(string)
+        except (ValueError, TypeError):
+            value = 0.0
+        if ndigits >= 0:
+            value = round(value, ndigits)
+        return (value,)
+
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("float",)
+    FUNCTION = "stringToFloat"
+    CATEGORY = "🐝TinyBee/Casting"
+
 class imp_isStringEmptyNode:
     def __init__(self):
         pass
@@ -3200,6 +3228,7 @@ NODE_CLASS_MAPPINGS = {
     # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
     "String to Int": imp_stringToIntNode,
+    "String to Float": imp_stringToFloatNode,
     "Is String Empty": imp_isStringEmptyNode,
     "Search To Boolean": imp_stringContainsNode,
     "None Image": imp_noneImgConstNode,
