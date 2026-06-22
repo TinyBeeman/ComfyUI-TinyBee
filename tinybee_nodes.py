@@ -3,6 +3,7 @@ import random
 import glob
 import re
 import json
+json_lib = json  # alias for nodes where 'json' is a local parameter name
 import csv as csvlib
 import hashlib
 import logging
@@ -14,6 +15,28 @@ import zipfile
 from io import BytesIO, StringIO
 from PIL import Image
 import folder_paths
+
+try:
+    from jsonata import Jsonata as _Jsonata
+except ImportError:
+    _Jsonata = None
+
+
+class _AnyType(str):
+    """Wildcard type that matches any ComfyUI type."""
+    def __ne__(self, other):
+        return False
+
+_ANY = _AnyType("*")
+
+class AlwaysEqualProxy(str):
+    def __eq__(self, _):
+        return True
+
+    def __ne__(self, _):
+        return False
+
+generic_type = AlwaysEqualProxy("*")
 
 
 def _normalize_image_batch(images):
@@ -361,13 +384,23 @@ class imp_indexedListEntryNode:
             "required": {
                 "index": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "string_list": ("STRING", {"forceInput": True}),
+            },
+            "optional": {
+                "allow_wraparound": ("BOOLEAN", {"default": True, "label_on": "Wraparound", "label_off": "Clamp"})
             }
         }
     
     @staticmethod
-    def getIndexedListEntry(index, string_list):
+    def getIndexedListEntry(index, string_list, allow_wraparound=True):
         if (len(string_list) > 0):
-            entry = string_list[index[0] % len(string_list)]
+            if allow_wraparound[0]:
+                idx = index[0] % len(string_list)
+            else:
+                # REturn "" for out of bounds instead of wrapping
+                if index[0] < 0 or index[0] >= len(string_list):
+                    return ("",)
+                idx = index[0]
+            entry = string_list[idx]
             return (entry,)
         return ("",)
     
@@ -546,9 +579,10 @@ class imp_filterListNode:
         if not string_list:
             return ([],)
 
+        norm_filter = string_filter[0].replace('\\', '/').lower() if string_filter[0] else ""
         filtered = []
         for item in string_list:
-            if string_filter[0] and string_filter[0] not in item:
+            if norm_filter and norm_filter not in item.replace('\\', '/').lower():
                 continue
             if age_filter[0] != -1:
                 # age_filter assumes that item is a path to a file
@@ -734,16 +768,19 @@ class imp_stringToListNode:
                 "combined_string": ("STRING", {"default": "", "forceInput": False, "multiline": True}),
                 "delimiter": (["comma", "semicolon", "space", "newline", "custom"], {"default": "newline"}),
                 "custom_delimiter": ("STRING", {"default": ";", "forceInput": False}),
+                "comment_prefix": ("STRING", {"default": "//", "forceInput": False}),
             }
         }
 
     @staticmethod
-    def parseList(combined_string, delimiter, custom_delimiter):
+    def parseList(combined_string, delimiter, custom_delimiter, comment_prefix="//"):
         # Normalize inputs from ComfyUI conventions (may come as single-item lists)
         if isinstance(delimiter, (list, tuple)) and delimiter:
             delimiter = delimiter[0]
         if isinstance(custom_delimiter, (list, tuple)) and custom_delimiter:
             custom_delimiter = custom_delimiter[0]
+        if isinstance(comment_prefix, (list, tuple)):
+            comment_prefix = comment_prefix[0] if comment_prefix else "//"
 
         s = ""
         if isinstance(combined_string, (list, tuple)):
@@ -752,6 +789,9 @@ class imp_stringToListNode:
             s = ""
         else:
             s = str(combined_string)
+
+        if comment_prefix:
+            s = "\n".join(line for line in s.splitlines() if not line.lstrip().startswith(comment_prefix))
 
         if delimiter == "comma":
             delim = ","
@@ -859,10 +899,14 @@ class imp_dictionaryLookupNode:
         pass
 
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return _kwargs_digest(kwargs)
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dict": ("OBJECT", {"forceInput": True}),
+                "dictionary": ("OBJECT", {"forceInput": True}),
             },
             "optional": {
                 "key": ("STRING", {"default": "", "forceInput": False, "multiline": False}),
@@ -871,10 +915,12 @@ class imp_dictionaryLookupNode:
         }
 
     @staticmethod
-    def lookupValue(dict, key="", default_value=""):
-        dict_value = _unwrap_single_value(dict)
+    def lookupValue(dictionary, key="", default_value=""):
+        dict_value = _unwrap_single_value(dictionary)
         key_value = _unwrap_single_value(key)
         default = _unwrap_single_value(default_value) or ""
+
+        print(f"Lookup node - raw dict input: {dict_value}, key: {key_value}, default: {default}")
 
         if isinstance(dict_value, str):
             try:
@@ -894,13 +940,14 @@ class imp_dictionaryLookupNode:
             if k != "" and k in dict_value:
                 lookup = str(dict_value.get(k, default))
 
+        print(f"Lookup node - final dict: {dict_value}, returning: {lookup}")
         return (lookup, key_strings)
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("lookup", "keys")
     OUTPUT_IS_LIST = (False, True)
     FUNCTION = "lookupValue"
-    CATEGORY = "🐝TinyBee/Lists"
+    CATEGORY = "🐝TinyBee/Dictionaries"
 
 class imp_filterFileExistsListNode:
     def __init__(self):
@@ -2504,6 +2551,10 @@ class imp_stringToFloatNode:
         pass
 
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return _kwargs_digest(kwargs)
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
@@ -2604,6 +2655,337 @@ class imp_noneImgConstNode:
     RETURN_NAMES = ("none",)
     FUNCTION = "noneConst"
     CATEGORY = "🐝TinyBee/Casting"
+
+
+_COMPARE_OPS = ["GT", "LT", "GTE", "LTE", "EQUAL", "NOTEQUAL"]
+
+def _apply_compare_op(a, b, op):
+    if op == "GT":      return a > b
+    if op == "LT":      return a < b
+    if op == "GTE":     return a >= b
+    if op == "LTE":     return a <= b
+    if op == "EQUAL":   return a == b
+    if op == "NOTEQUAL":return a != b
+    return False
+
+
+class imp_floatCompareNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "a": ("FLOAT", {"default": 0.0}),
+                "b": ("FLOAT", {"default": 0.0}),
+                "op": (_COMPARE_OPS, {"default": "EQUAL"}),
+            }
+        }
+
+    @staticmethod
+    def compare(a, b, op):
+        return (_apply_compare_op(float(a), float(b), op),)
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("Result",)
+    FUNCTION = "compare"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+class imp_intCompareNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "a": ("INT", {"default": 0}),
+                "b": ("INT", {"default": 0}),
+                "op": (_COMPARE_OPS, {"default": "EQUAL"}),
+            }
+        }
+
+    @staticmethod
+    def compare(a, b, op):
+        return (_apply_compare_op(int(a), int(b), op),)
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("Result",)
+    FUNCTION = "compare"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+class imp_stringCompareNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "a": ("STRING", {"default": ""}),
+                "b": ("STRING", {"default": ""}),
+                "op": (_COMPARE_OPS, {"default": "EQUAL"}),
+            }
+        }
+
+    @staticmethod
+    def compare(a, b, op):
+        return (_apply_compare_op(str(a), str(b), op),)
+
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("Result",)
+    FUNCTION = "compare"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+class imp_floatsToRectNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "nanValue": ("FLOAT", {"default": -1.0}),
+            },
+            "optional": {
+                "x":  ("FLOAT", {"default": -1.0}),
+                "y":  ("FLOAT", {"default": -1.0}),
+                "w":  ("FLOAT", {"default": -1.0}),
+                "h":  ("FLOAT", {"default": -1.0}),
+                "x2": ("FLOAT", {"default": -1.0}),
+                "y2": ("FLOAT", {"default": -1.0}),
+            }
+        }
+
+    @staticmethod
+    def floatsToRect(nanValue, x=-1.0, y=-1.0, w=-1.0, h=-1.0, x2=-1.0, y2=-1.0):
+        nan = float(nanValue)
+
+        def is_set(v):
+            return float(v) != nan
+
+        fx  = float(x)  if is_set(x)  else None
+        fy  = float(y)  if is_set(y)  else None
+        fw  = float(w)  if is_set(w)  else None
+        fh  = float(h)  if is_set(h)  else None
+        fx2 = float(x2) if is_set(x2) else None
+        fy2 = float(y2) if is_set(y2) else None
+
+        # Resolve X and width — priority: use x+w if all three are known
+        if fx is not None and fw is not None:
+            out_x, out_w = fx, fw
+        elif fx is not None and fx2 is not None:
+            out_x, out_w = fx, fx2 - fx
+        elif fw is not None and fx2 is not None:
+            out_x, out_w = fx2 - fw, fw
+        else:
+            out_x, out_w = 0.0, 0.0
+
+        # Resolve Y and height — priority: use y+h if all three are known
+        if fy is not None and fh is not None:
+            out_y, out_h = fy, fh
+        elif fy is not None and fy2 is not None:
+            out_y, out_h = fy, fy2 - fy
+        elif fh is not None and fy2 is not None:
+            out_y, out_h = fy2 - fh, fh
+        else:
+            out_y, out_h = 0.0, 0.0
+
+        return ((out_x, out_y, out_w, out_h),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "floatsToRect"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+class imp_rectToFloatsNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tinyrect": ("TINYRECT",),
+            }
+        }
+
+    @staticmethod
+    def rectToFloats(tinyrect):
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        return (x, y, w, h, x + w, y + h)
+
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("x", "y", "w", "h", "x2", "y2")
+    FUNCTION = "rectToFloats"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_intsToRectNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "nanValue": ("INT", {"default": -1}),
+            },
+            "optional": {
+                "x":  ("INT", {"default": -1}),
+                "y":  ("INT", {"default": -1}),
+                "w":  ("INT", {"default": -1}),
+                "h":  ("INT", {"default": -1}),
+                "x2": ("INT", {"default": -1}),
+                "y2": ("INT", {"default": -1}),
+            }
+        }
+
+    @staticmethod
+    def intsToRect(nanValue, x=-1, y=-1, w=-1, h=-1, x2=-1, y2=-1):
+        nan = int(nanValue)
+
+        def is_set(v):
+            return int(v) != nan
+
+        ix  = float(int(x))  if is_set(x)  else None
+        iy  = float(int(y))  if is_set(y)  else None
+        iw  = float(int(w))  if is_set(w)  else None
+        ih  = float(int(h))  if is_set(h)  else None
+        ix2 = float(int(x2)) if is_set(x2) else None
+        iy2 = float(int(y2)) if is_set(y2) else None
+
+        # Resolve X and width — priority: use x+w if all three are known
+        if ix is not None and iw is not None:
+            out_x, out_w = ix, iw
+        elif ix is not None and ix2 is not None:
+            out_x, out_w = ix, ix2 - ix
+        elif iw is not None and ix2 is not None:
+            out_x, out_w = ix2 - iw, iw
+        else:
+            out_x, out_w = 0.0, 0.0
+
+        # Resolve Y and height — priority: use y+h if all three are known
+        if iy is not None and ih is not None:
+            out_y, out_h = iy, ih
+        elif iy is not None and iy2 is not None:
+            out_y, out_h = iy, iy2 - iy
+        elif ih is not None and iy2 is not None:
+            out_y, out_h = iy2 - ih, ih
+        else:
+            out_y, out_h = 0.0, 0.0
+
+        return ((out_x, out_y, out_w, out_h),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "intsToRect"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_rectToIntsNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tinyrect": ("TINYRECT",),
+                "roundFloats": ("BOOLEAN", {"default": False, "label_on": "Round", "label_off": "Truncate"}),
+            }
+        }
+
+    @staticmethod
+    def rectToInts(tinyrect, roundFloats=False):
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        conv = round if roundFloats else int
+        ix, iy, iw, ih = conv(x), conv(y), conv(w), conv(h)
+        return (ix, iy, iw, ih, ix + iw, iy + ih)
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("x", "y", "w", "h", "x2", "y2")
+    FUNCTION = "rectToInts"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_intersectRectsNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "rectA": ("TINYRECT",),
+                "rectB": ("TINYRECT",),
+            }
+        }
+
+    @staticmethod
+    def intersectRects(rectA, rectB):
+        ax, ay, aw, ah = float(rectA[0]), float(rectA[1]), float(rectA[2]), float(rectA[3])
+        bx, by, bw, bh = float(rectB[0]), float(rectB[1]), float(rectB[2]), float(rectB[3])
+        ix = max(ax, bx)
+        iy = max(ay, by)
+        ix2 = min(ax + aw, bx + bw)
+        iy2 = min(ay + ah, by + bh)
+        return ((ix, iy, ix2 - ix, iy2 - iy),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "intersectRects"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_rectFromImgNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            }
+        }
+
+    @staticmethod
+    def rectFromImg(image):
+        batch = _normalize_image_batch(image)
+        h = float(batch.shape[1])
+        w = float(batch.shape[2])
+        return ((0.0, 0.0, w, h),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "rectFromImg"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_scaleRectNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tinyrect": ("TINYRECT",),
+                "xScale": ("FLOAT", {"default": 1.0, "step": 0.01}),
+                "yScale": ("FLOAT", {"default": 1.0, "step": 0.01}),
+            }
+        }
+
+    @staticmethod
+    def scaleRect(tinyrect, xScale, yScale):
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        return ((x * float(xScale), y * float(yScale), w * float(xScale), h * float(yScale)),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "scaleRect"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_sequenceNode:
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # Using unique lowercase/uppercase patterns or standard types helps ComfyUI resolve the inputs
+                "passthrough": ("STRING", {"forceInput": True}),
+                "dependency": ("STRING", {"forceInput": True}),
+            }
+        }
+
+    @staticmethod
+    def sequence(passthrough, dependency):
+        return (passthrough,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("passthrough",)
+    FUNCTION = "sequence"
+    CATEGORY = "🐝TinyBee/Util"
 
 class imp_interpolateFramesNode:
     def __init__(self):
@@ -2784,14 +3166,6 @@ def encodeRawProperty(property_name, property_value, value_type="UNKNOWN"):
         }
         return propObj
 
-class AlwaysEqualProxy(str):
-    def __eq__(self, _):
-        return True
-
-    def __ne__(self, _):
-        return False
-    
-generic_type = AlwaysEqualProxy("*")
 
 class imp_encodeAnyPropertyNode:
     def __init__(self):
@@ -2857,10 +3231,11 @@ class imp_combinePropertiesNode:
         add_property(prop_c)
         add_property(prop_d)
 
-        return (combined,)
+        combined_json = json.dumps(combined)
+        return (combined, combined_json)
 
-    RETURN_TYPES = ("TINYPROPS",)
-    RETURN_NAMES = ("combined_properties",)
+    RETURN_TYPES = ("TINYPROPS","STRING")
+    RETURN_NAMES = ("combined_properties", "combined_properties_json")
     FUNCTION = "combineProperties"
     CATEGORY = "🐝TinyBee/Util"
 
@@ -3138,6 +3513,22 @@ class imp_fileMetadataNode:
         pass
 
     @classmethod
+    def IS_CHANGED(cls, image_path=""):
+        image_path = (image_path or "").strip()
+        if not image_path:
+            return ""
+        image_dir = os.path.dirname(image_path)
+        image_basename = os.path.splitext(os.path.basename(image_path))[0]
+        folder_name = os.path.basename(image_dir)
+        mtimes = [image_path]
+        for path in [
+            os.path.join(image_dir, f"{folder_name}-defaults.json"),
+            os.path.join(image_dir, f"{image_basename}-meta.json"),
+        ]:
+            mtimes.append(os.path.getmtime(path) if os.path.isfile(path) else None)
+        return str(mtimes)
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
@@ -3184,7 +3575,60 @@ class imp_fileMetadataNode:
     RETURN_NAMES = ("metadata",)
     OUTPUT_IS_LIST = (False,)
     FUNCTION = "getFileMetadata"
-    CATEGORY = "🐝TinyBee/Lists"
+    CATEGORY = "🐝TinyBee/Dictionaries"
+
+
+class imp_jsonParserNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "expression": ("STRING", {"default": "$", "multiline": False, "forceInput": False}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+            }
+        }
+
+    @staticmethod
+    def parseJson(json, expression, seed):
+        if _Jsonata is None:
+            raise RuntimeError("jsonata is not installed. Run: pip install jsonata")
+
+        raw = _unwrap_single_value(json) or ""
+        expr_str = _unwrap_single_value(expression) or "$"
+        seed_val = int(_unwrap_single_value(seed) or 0)
+
+        try:
+            data = json_lib.loads(raw)
+        except Exception as e:
+            return (json_lib.dumps({"error": f"JSON parse error: {e}"}),)
+
+        try:
+            rng = random.Random(seed_val)
+
+            def _sshuffle(arr):
+                if not isinstance(arr, list):
+                    return arr
+                result = arr[:]
+                rng.shuffle(result)
+                return result
+
+            expr = _Jsonata(expr_str)
+            expr.assign("srnd", rng.random)
+            expr.assign("sshuffle", _sshuffle)
+            result = expr.evaluate(data)
+        except Exception as e:
+            return (json_lib.dumps({"error": f"JSONata error: {e}"}),)
+
+        return (json_lib.dumps(result, ensure_ascii=False),)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "parseJson"
+    CATEGORY = "🐝TinyBee/Utilities"
 
 
 # A dictionary that contains all nodes you want to export with their names
@@ -3194,8 +3638,6 @@ NODE_CLASS_MAPPINGS = {
     "CSV Parser": imp_csvParserNode,
     "Combine Lists": imp_combineListsNode,
     "Decorate List": imp_decorateListNode,
-    "Dictionary Lookup": imp_dictionaryLookupNode,
-    "File Metadata": imp_fileMetadataNode,
     "Filter Existing Files": imp_filterFileExistsListNode,
     "Filter List": imp_filterListNode,
     "Filter Words": imp_filterWordsNode,
@@ -3211,7 +3653,12 @@ NODE_CLASS_MAPPINGS = {
     "Split List": imp_splitListNode,
     "String To List": imp_stringToListNode,
 
+    # Dictionary Nodes
+    "File Metadata": imp_fileMetadataNode,
+    "Dictionary Lookup": imp_dictionaryLookupNode,
+
     # Utility Nodes
+    "JSON Parser": imp_jsonParserNode,
     "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
     "Prompt Splitter": imp_promptSplitterNode,
@@ -3219,6 +3666,7 @@ NODE_CLASS_MAPPINGS = {
     "Timestamp": imp_timestampNode,
     "Tiny Random": imp_tinyRandomNode,
     "Force Aspect On Bounds": imp_forceAspectOnBoundsNode,
+    "Sequence": imp_sequenceNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
     "Face Body Aspect Bounds": imp_faceBodyAspectBoundsNode,
@@ -3232,6 +3680,18 @@ NODE_CLASS_MAPPINGS = {
     "Is String Empty": imp_isStringEmptyNode,
     "Search To Boolean": imp_stringContainsNode,
     "None Image": imp_noneImgConstNode,
+    "Float Compare": imp_floatCompareNode,
+    "Int Compare": imp_intCompareNode,
+    "String Compare": imp_stringCompareNode,
+
+    # Rectangle Nodes
+    "Rect to Floats": imp_rectToFloatsNode,
+    "Floats to Rect": imp_floatsToRectNode,
+    "Rect to Ints": imp_rectToIntsNode,
+    "Ints to Rect": imp_intsToRectNode,
+    "Intersect Rects": imp_intersectRectsNode,
+    "Rect From Image": imp_rectFromImgNode,
+    "Scale Rect": imp_scaleRectNode,
 
     # Workflow Nodes
     "Grid Maker (Dynamic)": imp_gridMakerDynamicNode,
