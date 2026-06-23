@@ -14,12 +14,20 @@ import torch
 import zipfile
 from io import BytesIO, StringIO
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 import folder_paths
+from comfy.cli_args import args
 
 try:
     from jsonata import Jsonata as _Jsonata
-except ImportError:
-    _Jsonata = None
+except Exception as _e:
+    try:
+        # jsonata-python installs the class in the submodule in some versions
+        from jsonata.jsonata import Jsonata as _Jsonata
+    except Exception:
+        import sys as _sys
+        print(f"[TinyBee] jsonata-python not available ({_e}). Run: pip install jsonata-python", file=_sys.stderr)
+        _Jsonata = None
 
 
 class _AnyType(str):
@@ -3371,6 +3379,188 @@ class imp_saveImageBatchToZipNode:
     CATEGORY = "🐝TinyBee/Queue"
 
 
+class imp_saveImageWithMetaNode:
+    def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+        self.type = "output"
+        self.compress_level = 4
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images":           ("IMAGE",),
+                "prefix":           ("STRING",  {"default": "ComfyUI", "multiline": False}),
+                "prefix_delimiter": ("STRING",  {"default": "_",       "multiline": False}),
+                "prefix_2":         ("STRING",  {"default": "",        "multiline": False}),
+                "output_folder":    ("STRING",  {"default": "",        "multiline": False}),
+                "save_workspace":   ("BOOLEAN", {"default": True,
+                                                 "label_on": "Save Workspace",
+                                                 "label_off": "No Workspace"}),
+            },
+            "optional": {
+                "metadata_props": ("TINYPROPS", {"default": None}),
+            },
+            "hidden": {
+                "prompt":        "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    def save_image_with_meta(self, images, prefix="ComfyUI", prefix_delimiter="_",
+                             prefix_2="", output_folder="", save_workspace=True,
+                             metadata_props=None, prompt=None, extra_pnginfo=None):
+        full_prefix = prefix + (prefix_delimiter + prefix_2 if prefix_2.strip() else "")
+
+        out_dir = self.output_dir
+        if output_folder.strip():
+            out_dir = os.path.join(self.output_dir, output_folder.strip())
+            os.makedirs(out_dir, exist_ok=True)
+
+        full_output_folder, filename, counter, subfolder, filename_prefix = \
+            folder_paths.get_save_image_path(full_prefix, out_dir,
+                                             images[0].shape[1], images[0].shape[0])
+
+        results = []
+        for batch_number, image in enumerate(images):
+            img = Image.fromarray(np.clip(255. * image.cpu().numpy(), 0, 255).astype(np.uint8))
+
+            pnginfo = None
+            if not args.disable_metadata:
+                pnginfo = PngInfo()
+                if prompt is not None:
+                    pnginfo.add_text("prompt", json.dumps(prompt))
+                if save_workspace and extra_pnginfo is not None:
+                    for key in extra_pnginfo:
+                        pnginfo.add_text(key, json.dumps(extra_pnginfo[key]))
+                if metadata_props:
+                    tinyprops_data = {k: {"type": v["type"], "value": v["value"]}
+                                      for k, v in metadata_props.items()}
+                    pnginfo.add_text("tinyprops", json.dumps(tinyprops_data))
+
+            filename_with_batch = filename.replace("%batch_num%", str(batch_number))
+            file = f"{filename_with_batch}_{counter:05}_.png"
+            img.save(os.path.join(full_output_folder, file),
+                     pnginfo=pnginfo, compress_level=self.compress_level)
+            results.append({"filename": file, "subfolder": subfolder, "type": self.type})
+            counter += 1
+
+        return {"ui": {"images": results}}
+
+    RETURN_TYPES = ()
+    FUNCTION = "save_image_with_meta"
+    OUTPUT_NODE = True
+    CATEGORY = "🐝TinyBee/Images"
+
+
+class imp_loadImageWithMetaNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_path": ("STRING", {"default": "", "multiline": False}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "TINYPROPS")
+    RETURN_NAMES = ("image", "mask", "metadata_props")
+    FUNCTION = "load_image_with_meta"
+    CATEGORY = "🐝TinyBee/Images"
+
+    def load_image_with_meta(self, image_path):
+        resolved = (image_path if os.path.isabs(image_path)
+                    else os.path.join(folder_paths.get_output_directory(), image_path))
+
+        img = Image.open(resolved)
+
+        tinyprops = {}
+        if hasattr(img, 'text') and 'tinyprops' in img.text:
+            try:
+                stored = json.loads(img.text['tinyprops'])
+                tinyprops = {
+                    name: {"name": name, "type": entry["type"], "value": entry["value"]}
+                    for name, entry in stored.items()
+                }
+            except (json.JSONDecodeError, KeyError, TypeError):
+                pass
+
+        img_rgb = img.convert("RGB")
+        img_np = np.array(img_rgb).astype(np.float32) / 255.0
+        image_tensor = torch.from_numpy(img_np)[None,]
+
+        if 'A' in img.getbands():
+            alpha_np = np.array(img.getchannel('A')).astype(np.float32) / 255.0
+            mask_tensor = torch.from_numpy(1. - alpha_np).unsqueeze(0)
+        else:
+            mask_tensor = torch.zeros(
+                (1, image_tensor.shape[1], image_tensor.shape[2]), dtype=torch.float32
+            )
+
+        return (image_tensor, mask_tensor, tinyprops)
+
+    @classmethod
+    def IS_CHANGED(cls, image_path):
+        resolved = (image_path if os.path.isabs(image_path)
+                    else os.path.join(folder_paths.get_output_directory(), image_path))
+        if not os.path.exists(resolved):
+            return float("NaN")
+        m = hashlib.sha256()
+        with open(resolved, 'rb') as f:
+            m.update(f.read())
+        return m.digest().hex()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image_path):
+        if not image_path or not image_path.strip():
+            return "Image path cannot be empty"
+        resolved = (image_path if os.path.isabs(image_path)
+                    else os.path.join(folder_paths.get_output_directory(), image_path))
+        if not os.path.exists(resolved):
+            return f"Image file not found: {resolved}"
+        return True
+
+
+_MAX_ENCODE_PROPS = 16
+
+class imp_encodeAnyPropertiesNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = {
+            "required": {
+                "num_properties": ("INT", {"default": 3, "min": 1, "max": _MAX_ENCODE_PROPS}),
+            },
+            "optional": {},
+        }
+        for i in range(1, _MAX_ENCODE_PROPS + 1):
+            inputs["optional"][f"name_{i}"] = ("STRING", {"default": f"property_{i}", "multiline": False})
+            inputs["optional"][f"value_{i}"] = (generic_type,)
+        return inputs
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    def encodeAnyProperties(self, num_properties, **kwargs):
+        result = {}
+        for i in range(1, num_properties + 1):
+            name = kwargs.get(f"name_{i}", f"property_{i}")
+            if isinstance(name, str):
+                name = name.strip()
+            if not name:
+                continue
+            value = kwargs.get(f"value_{i}")
+            result[name] = encodeRawProperty(name, value)
+        return (result,)
+
+    RETURN_TYPES = ("TINYPROPS",)
+    RETURN_NAMES = ("properties",)
+    FUNCTION = "encodeAnyProperties"
+    CATEGORY = "🐝TinyBee/Util"
+
 
 class imp_loadImageBatchFromZipNode:
     def __init__(self):
@@ -3587,18 +3777,18 @@ class imp_jsonParserNode:
         return {
             "required": {
                 "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
-                "expression": ("STRING", {"default": "$", "multiline": False, "forceInput": False}),
+                "jsonata": ("STRING", {"default": "$", "multiline": False, "forceInput": False}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
             }
         }
 
     @staticmethod
-    def parseJson(json, expression, seed):
+    def parseJson(json, jsonata, seed):
         if _Jsonata is None:
             raise RuntimeError("jsonata is not installed. Run: pip install jsonata")
 
         raw = _unwrap_single_value(json) or ""
-        expr_str = _unwrap_single_value(expression) or "$"
+        expr_str = _unwrap_single_value(jsonata) or "$"
         seed_val = int(_unwrap_single_value(seed) or 0)
 
         try:
@@ -3617,8 +3807,8 @@ class imp_jsonParserNode:
                 return result
 
             expr = _Jsonata(expr_str)
-            expr.assign("srnd", rng.random)
-            expr.assign("sshuffle", _sshuffle)
+            expr.register_lambda("srnd", rng.random)
+            expr.register_lambda("sshuffle", _sshuffle)
             result = expr.evaluate(data)
         except Exception as e:
             return (json_lib.dumps({"error": f"JSONata error: {e}"}),)
@@ -3699,8 +3889,11 @@ NODE_CLASS_MAPPINGS = {
     "Randomize Image Batch": imp_randomizeImageBatchNode,
     "Images From Batch": imp_imagesFromBatchNode,
     "Save Image Batch to Zip": imp_saveImageBatchToZipNode,
+    "Save Image w/Meta": imp_saveImageWithMetaNode,
+    "Load Image w/Meta": imp_loadImageWithMetaNode,
     "Load Image Batch from Zip": imp_loadImageBatchFromZipNode,
     "Encode Any Property": imp_encodeAnyPropertyNode,
+    "Encode Any Properties (Dynamic)": imp_encodeAnyPropertiesNode,
     "Combine Properties": imp_combinePropertiesNode,
     "Prop From Properties": imp_getPropertyFromPropertiesNode,
     "Json From Properties": imp_getJsonFromPropertiesNode,
