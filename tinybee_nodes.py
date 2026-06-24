@@ -46,6 +46,13 @@ class AlwaysEqualProxy(str):
 
 generic_type = AlwaysEqualProxy("*")
 
+def _strip_quotes(value):
+    if isinstance(value, str):
+        s = value.strip()
+        if len(s) >= 2 and s[0] in ('"', "'") and s[-1] == s[0]:
+            return s[1:-1]
+    return value
+
 
 def _normalize_image_batch(images):
     """Normalize possible IMAGE input shapes/types to a 4D torch batch [B, H, W, C]."""
@@ -3415,14 +3422,11 @@ class imp_saveImageWithMetaNode:
                              prefix_2="", output_folder="", save_workspace=True,
                              metadata_props=None, prompt=None, extra_pnginfo=None):
         full_prefix = prefix + (prefix_delimiter + prefix_2 if prefix_2.strip() else "")
-
-        out_dir = self.output_dir
         if output_folder.strip():
-            out_dir = os.path.join(self.output_dir, output_folder.strip())
-            os.makedirs(out_dir, exist_ok=True)
+            full_prefix = output_folder.strip() + "/" + full_prefix
 
         full_output_folder, filename, counter, subfolder, filename_prefix = \
-            folder_paths.get_save_image_path(full_prefix, out_dir,
+            folder_paths.get_save_image_path(full_prefix, self.output_dir,
                                              images[0].shape[1], images[0].shape[0])
 
         results = []
@@ -3449,9 +3453,10 @@ class imp_saveImageWithMetaNode:
             results.append({"filename": file, "subfolder": subfolder, "type": self.type})
             counter += 1
 
-        return {"ui": {"images": results}}
+        return {"ui": {"images": results}, "result": (images,)}
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
     FUNCTION = "save_image_with_meta"
     OUTPUT_NODE = True
     CATEGORY = "🐝TinyBee/Images"
@@ -3778,12 +3783,13 @@ class imp_jsonParserNode:
             "required": {
                 "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
                 "jsonata": ("STRING", {"default": "$", "multiline": False, "forceInput": False}),
+                "stripQuotes": ("BOOLEAN", {"default": True, "label_on": "Strip Quotes", "label_off": "Keep Quotes"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
             }
         }
 
     @staticmethod
-    def parseJson(json, jsonata, seed):
+    def parseJson(json, jsonata, stripQuotes, seed):
         if _Jsonata is None:
             raise RuntimeError("jsonata is not installed. Run: pip install jsonata")
 
@@ -3813,11 +3819,38 @@ class imp_jsonParserNode:
         except Exception as e:
             return (json_lib.dumps({"error": f"JSONata error: {e}"}),)
 
-        return (json_lib.dumps(result, ensure_ascii=False),)
+        json_result = json_lib.dumps(result, ensure_ascii=False)
+
+        if stripQuotes:
+            json_result = _strip_quotes(json_result)
+    
+        return (json_result,)
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("result",)
     FUNCTION = "parseJson"
+    CATEGORY = "🐝TinyBee/Utilities"
+
+
+class imp_stripQuotesNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "", "forceInput": False, "multiline": False}),
+            }
+        }
+
+    @staticmethod
+    def stripQuotes(text):
+        return (_strip_quotes(text),)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "stripQuotes"
     CATEGORY = "🐝TinyBee/Utilities"
 
 
@@ -3848,7 +3881,6 @@ NODE_CLASS_MAPPINGS = {
     "Dictionary Lookup": imp_dictionaryLookupNode,
 
     # Utility Nodes
-    "JSON Parser": imp_jsonParserNode,
     "Process Path Name": imp_processPathNameNode,
     "Incrementer": imp_incrementerNode,
     "Prompt Splitter": imp_promptSplitterNode,
@@ -3862,6 +3894,10 @@ NODE_CLASS_MAPPINGS = {
     "Face Body Aspect Bounds": imp_faceBodyAspectBoundsNode,
     "Search and Replace": imp_searchReplaceNode,
     "Iterate Seed": imp_iterateSeedNode,
+
+    # JSON Nodes
+    "JSON Parser": imp_jsonParserNode,
+    "Strip Quotes": imp_stripQuotesNode,
 
     # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
