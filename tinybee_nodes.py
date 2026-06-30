@@ -46,6 +46,8 @@ class AlwaysEqualProxy(str):
 
 generic_type = AlwaysEqualProxy("*")
 
+_auto_seed_counter: int = 0
+
 def _strip_quotes(value):
     if isinstance(value, str):
         s = value.strip()
@@ -2476,7 +2478,7 @@ class imp_searchReplaceNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("output_string",)
     FUNCTION = "searchReplace"
-    CATEGORY = "🐝TinyBee/Util"
+    CATEGORY = "🐝TinyBee/Strings"
 
 class imp_iterateSeedNode:
     def __init__(self):
@@ -2513,6 +2515,34 @@ class imp_iterateSeedNode:
     FUNCTION = "iterateSeed"
     CATEGORY = "🐝TinyBee/Util"
 
+class imp_autoSeedNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "reset_seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @staticmethod
+    def autoSeed(reset_seed=-1):
+        global _auto_seed_counter
+        if reset_seed >= 0:
+            _auto_seed_counter = reset_seed
+        else:
+            _auto_seed_counter += 1
+        output = random.Random(_auto_seed_counter).randint(0, 0xffffffffffffffff)
+        return (output,)
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("seed",)
+    FUNCTION = "autoSeed"
+    CATEGORY = "🐝TinyBee/Util"
+
 class imp_intToBoolNode:
     def __init__(self):
         pass
@@ -2534,6 +2564,31 @@ class imp_intToBoolNode:
     RETURN_NAMES = ("boolean",)
     FUNCTION = "intToBool"
     CATEGORY = "🐝TinyBee/Casting"
+
+class imp_intToLeadingStringNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "integer": ("INT", {"default": 0, "min": -2147483648, "max": 2147483647}),
+                "min_digit_count": ("INT", {"default": 1, "min": 1, "max": 20}),
+            }
+        }
+
+    @staticmethod
+    def intToLeadingString(integer, min_digit_count):
+        negative = integer < 0
+        digits = str(abs(integer)).zfill(min_digit_count)
+        return (f"-{digits}" if negative else digits,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "intToLeadingString"
+    CATEGORY = "🐝TinyBee/Casting"
+
 
 class imp_stringToIntNode:
     def __init__(self):
@@ -2618,7 +2673,32 @@ class imp_isStringEmptyNode:
     RETURN_TYPES = ("BOOLEAN",)
     RETURN_NAMES = ("boolean",)
     FUNCTION = "isStringEmpty"
-    CATEGORY = "🐝TinyBee/Casting"
+    CATEGORY = "🐝TinyBee/Strings"
+
+
+class imp_miniSearchReplaceNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "original": ("STRING", {"default": "", "multiline": False}),
+                "search": ("STRING", {"default": "", "multiline": False}),
+                "replace": ("STRING", {"default": "", "multiline": False}),
+            }
+        }
+
+    @staticmethod
+    def stringReplace(original, search, replace):
+        result = original.replace(search, replace)
+        return (result,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "stringReplace"
+    CATEGORY = "🐝TinyBee/Strings"
 
 
 class imp_stringContainsNode:
@@ -2648,7 +2728,109 @@ class imp_stringContainsNode:
     RETURN_TYPES = ("BOOLEAN",)
     RETURN_NAMES = ("contains",)
     FUNCTION = "stringContains"
-    CATEGORY = "🐝TinyBee/Casting"
+    CATEGORY = "🐝TinyBee/Strings"
+
+class imp_sanitizeFilePathNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "path": ("STRING", {"default": ""}),
+                "replace_spaces": ("STRING", {"default": " ", "forceInput": False}),
+                "replace_invalid_chars": ("STRING", {"default": "_", "forceInput": False}),
+                "extra_invalid_chars": ("STRING", {"default": "", "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def sanitizeFilePath(path, replace_spaces=" ", replace_invalid_chars="_", extra_invalid_chars=""):
+        """Sanitize the file path by removing invalid characters."""
+        sanitized_path = re.sub(r'[,<>:"/\\|?*]', replace_invalid_chars, path)
+        if replace_spaces != " ":
+            sanitized_path = sanitized_path.replace(" ", replace_spaces)
+        if extra_invalid_chars:
+            sanitized_path = re.sub(f"[{re.escape(extra_invalid_chars)}]", replace_invalid_chars, sanitized_path)
+        return (sanitized_path,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("sanitized_path",)
+    FUNCTION = "sanitizeFilePath"
+    CATEGORY = "🐝TinyBee/Strings"
+
+
+_MAX_COMBINE_LISTS = 10
+
+
+class imp_stringCombinerNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = {
+            "required": {
+                "num_lists": ("INT", {"default": 2, "min": 1, "max": _MAX_COMBINE_LISTS}),
+                "template": ("STRING", {"default": "%1, %2", "multiline": True, "forceInput": False}),
+                "index": ("INT", {"default": 0, "min": -1, "max": 2147483647, "forceInput": False}),
+            },
+            "optional": {},
+        }
+        for i in range(1, _MAX_COMBINE_LISTS + 1):
+            inputs["optional"][f"list_{i}"] = ("STRING", {"forceInput": True})
+        return inputs
+    
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @staticmethod
+    def combineStrings(num_lists, template, index, **kwargs):
+        n = int(num_lists[0]) if isinstance(num_lists, (list, tuple)) else int(num_lists)
+        tmpl = str(template[0]) if isinstance(template, (list, tuple)) else str(template)
+        idx = int(index[0]) if isinstance(index, (list, tuple)) else int(index)
+
+        lists = []
+        for i in range(1, n + 1):
+            list_key = f"list_{i}"
+            if list_key in kwargs:
+                lists.append(kwargs[list_key])
+            else:
+                lists.append("")
+
+        total_combos = 1
+        for lst in lists:
+            total_combos *= len(lst) if isinstance(lst, (list, tuple)) else 1
+
+        if idx == -1:
+            idx = random.randint(0, total_combos - 1) if total_combos > 0 else 0
+        else:
+            idx = idx % total_combos if total_combos > 0 else 0
+
+        combination = []
+        for lst in reversed(lists):
+            if isinstance(lst, (list, tuple)) and len(lst) > 0:
+                list_idx = idx % len(lst)
+                combination.append(lst[list_idx])
+                idx //= len(lst)
+            else:
+                combination.append("")
+
+        combination.reverse()
+        combined_string = tmpl
+        for i, value in enumerate(combination, start=1):
+            combined_string = combined_string.replace(f"%{i}", str(value))
+
+        return (combined_string, idx, total_combos)
+
+
+    RETURN_TYPES = ("STRING", "INT", "INT")
+    INPUT_IS_LIST = True
+    RETURN_NAMES = ("combined_string", "index", "total_combos")
+    FUNCTION = "combineStrings"
+    CATEGORY = "🐝TinyBee/Strings"
 
 class imp_noneImgConstNode:
     def __init__(self):
@@ -3447,7 +3629,11 @@ class imp_saveImageWithMetaNode:
                     pnginfo.add_text("tinyprops", json.dumps(tinyprops_data))
 
             filename_with_batch = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch}_{counter:05}_.png"
+            cleanfile = filename_with_batch + ".png"
+            if len(images) == 1 and not os.path.exists(os.path.join(full_output_folder, cleanfile)):
+                file = cleanfile
+            else:
+                file = f"{filename_with_batch}_{counter:05}.png"
             img.save(os.path.join(full_output_folder, file),
                      pnginfo=pnginfo, compress_level=self.compress_level)
             results.append({"filename": file, "subfolder": subfolder, "type": self.type})
@@ -3800,7 +3986,7 @@ class imp_jsonParserNode:
         try:
             data = json_lib.loads(raw)
         except Exception as e:
-            return (json_lib.dumps({"error": f"JSON parse error: {e}"}),)
+            raise ValueError(f"JSON parse error: {e}") from e
 
         try:
             rng = random.Random(seed_val)
@@ -3817,7 +4003,7 @@ class imp_jsonParserNode:
             expr.register_lambda("sshuffle", _sshuffle)
             result = expr.evaluate(data)
         except Exception as e:
-            return (json_lib.dumps({"error": f"JSONata error: {e}"}),)
+            raise ValueError(f"JSONata error: {e}") from e
 
         json_result = json_lib.dumps(result, ensure_ascii=False)
 
@@ -3829,7 +4015,7 @@ class imp_jsonParserNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("result",)
     FUNCTION = "parseJson"
-    CATEGORY = "🐝TinyBee/Utilities"
+    CATEGORY = "🐝TinyBee/Strings"
 
 
 class imp_stripQuotesNode:
@@ -3851,7 +4037,43 @@ class imp_stripQuotesNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
     FUNCTION = "stripQuotes"
-    CATEGORY = "🐝TinyBee/Utilities"
+    CATEGORY = "🐝TinyBee/Strings"
+
+
+class imp_tokenReplaceNode:
+    MAX_TOKENS = 10
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional_inputs = {}
+        for i in range(1, cls.MAX_TOKENS):
+            optional_inputs[f"input_{i}"] = ("STRING", {"forceInput": True})
+        return {
+            "required": {
+                "template": ("STRING", {"default": "this will replace %0 with input_0", "multiline": True}),
+                "token_count": ("INT", {"default": 1, "min": 1, "max": cls.MAX_TOKENS}),
+                "input_0": ("STRING", {"default": "", "multiline": False}),
+            },
+            "optional": optional_inputs,
+        }
+
+    @staticmethod
+    def tokenReplace(template, input_0, **kwargs):
+        # token_count lands in kwargs; used only by the JS UI to show/hide inputs
+        result = str(template)
+        result = result.replace("%0", str(input_0))
+        for i in range(1, 10):
+            value = kwargs.get(f"input_{i}", "") or ""
+            result = result.replace(f"%{i}", str(value))
+        return (result,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("result",)
+    FUNCTION = "tokenReplace"
+    CATEGORY = "🐝TinyBee/Strings"
 
 
 # A dictionary that contains all nodes you want to export with their names
@@ -3892,19 +4114,25 @@ NODE_CLASS_MAPPINGS = {
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
     "Face Body Aspect Bounds": imp_faceBodyAspectBoundsNode,
-    "Search and Replace": imp_searchReplaceNode,
     "Iterate Seed": imp_iterateSeedNode,
+    "Auto Seed": imp_autoSeedNode,
 
-    # JSON Nodes
+    # String Nodes
     "JSON Parser": imp_jsonParserNode,
     "Strip Quotes": imp_stripQuotesNode,
+    "Token Replace": imp_tokenReplaceNode,
+    "Search and Replace": imp_searchReplaceNode,
+    "S&R": imp_miniSearchReplaceNode,
+    "Search To Boolean": imp_stringContainsNode,
+    "Is String Empty": imp_isStringEmptyNode,
+    "Sanitize File Path": imp_sanitizeFilePathNode,
+    "String Combiner": imp_stringCombinerNode,
 
     # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
+    "Int to Leading String": imp_intToLeadingStringNode,
     "String to Int": imp_stringToIntNode,
     "String to Float": imp_stringToFloatNode,
-    "Is String Empty": imp_isStringEmptyNode,
-    "Search To Boolean": imp_stringContainsNode,
     "None Image": imp_noneImgConstNode,
     "Float Compare": imp_floatCompareNode,
     "Int Compare": imp_intCompareNode,

@@ -12,71 +12,80 @@ function buildViewUrl(img) {
   return api.apiURL(`/view?${params}`)
 }
 
-function applyImagePreview(node, images) {
-  const imgs = []
-  let pending = images.length
-  for (const img of images) {
-    const el = new Image()
-    el.onload = () => {
-      if (--pending === 0) app.graph?.setDirtyCanvas(true, true)
-    }
-    el.src = buildViewUrl(img)
-    imgs.push(el)
-  }
-  node.imgs = imgs
-  node.imageIndex = null
-  app.graph?.setDirtyCanvas(true, true)
-}
-
 app.registerExtension({
   name: 'TinyBee.SaveImageWithMetaPreview',
 
   async beforeConfigureGraph() {
-    const originalOnExecuted = app.canvas.onExecuted
-    app.canvas.onExecuted = function (message) {
-      originalOnExecuted?.call(this, message)
+    const nodeType = LiteGraph.registered_node_types[NODE_NAME];
+    
+    if (nodeType) {
+      // Ensure the engine serializes this node's visual layer
+      nodeType.prototype.getCanvasMenuOptions = function(options) {
+        // This forces ComfyUI to see this node as eligible for subgraph promotion
+        this.isVirtualNode = false;
+      };
 
-      const images = message?.output?.images
-      if (!images?.length) return
+      nodeType.prototype.onExecuted = function (message) {
+        const images = message?.images;
+        if (!images?.length) return;
 
-      const nodeId = String(message.node ?? '')
+        this.imgs = images.map(img => {
+          const el = new Image();
+          el.src = buildViewUrl(img);
+          el.onload = () => app.graph?.setDirtyCanvas(true, true);
+          return el;
+        });
 
-      if (!nodeId.includes(':')) {
-        // Top-level: plain node ID, find and apply directly
-        const node = app.graph?.getNodeById(parseInt(nodeId, 10))
-        if (node && (node.type === NODE_NAME || node.comfyClass === NODE_NAME)) {
-          applyImagePreview(node, images)
+        this.imageIndex = 0;
+        app.graph?.setDirtyCanvas(true, true);
+      };
+
+      // Proportional aspect-ratio fitting
+      nodeType.prototype.onDrawBackground = function(ctx) {
+        if (!this.imgs || this.imgs.length === 0) return;
+        
+        const img = this.imgs[this.imageIndex || 0];
+        if (!img || !img.complete) return;
+        
+        const margin = 10;
+        const top_offset = this.widgets_start_y || 60;
+        
+        // Max allowable bounds
+        const max_w = this.size[0] - margin * 2;
+        const max_h = this.size[1] - top_offset - margin;
+        
+        if (max_w <= 0 || max_h <= 0) return;
+
+        // Calculate aspect ratios
+        const imgRatio = img.width / img.height;
+        const targetRatio = max_w / max_h;
+        
+        let draw_w = max_w;
+        let draw_h = max_h;
+        
+        if (imgRatio > targetRatio) {
+          // Image is wider than target area bounds
+          draw_h = max_w / imgRatio;
+        } else {
+          // Image is taller than target area bounds
+          draw_w = max_h * imgRatio;
         }
-        return
-      }
-
-      // Subgraph: compound ID like "3:7" means subgraph boundary 3, inner node 7.
-      // Multi-level nesting ("1:3:7") is also handled by traversing each segment.
-      const parts = nodeId.split(':')
-      const leafId = parseInt(parts[parts.length - 1], 10)
-
-      let currentGraph = app.graph
-      for (let i = 0; i < parts.length - 1; i++) {
-        const instance = currentGraph?.getNodeById(parseInt(parts[i], 10))
-        if (!instance?.subgraph) { currentGraph = null; break }
-        currentGraph = instance.subgraph
-      }
-      const innerNode = currentGraph?.getNodeById(leafId)
-
-      if (innerNode && (innerNode.type === NODE_NAME || innerNode.comfyClass === NODE_NAME)) {
-        // Apply to inner node so the preview is visible when viewing inside the subgraph
-        applyImagePreview(innerNode, images)
-
-        // Apply to boundary node so the preview is visible from outside the subgraph
-        const displayId = parseInt(String(message.display_node ?? parts[0]), 10)
-        const boundaryNode = app.graph?.getNodeById(displayId)
-        if (boundaryNode) applyImagePreview(boundaryNode, images)
-      }
+        
+        // Center the image within the bounding box dynamically
+        const offset_x = margin + (max_w - draw_w) / 2;
+        const offset_y = top_offset + (max_h - draw_h) / 2;
+        
+        ctx.save();
+        ctx.drawImage(img, offset_x, offset_y, draw_w, draw_h);
+        ctx.restore();
+      };
     }
   },
 
   nodeCreated(node) {
-    if (node.comfyClass !== NODE_NAME && node.type !== NODE_NAME) return
-    node.isVirtualNode = false
-  },
-})
+    if (node.comfyClass !== NODE_NAME && node.type !== NODE_NAME) return;
+    node.isVirtualNode = false;
+    // Tell the wrapper compilation model to look for visual data here
+    node.show_canvas_preview = true; 
+  }
+});
