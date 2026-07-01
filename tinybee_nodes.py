@@ -808,7 +808,15 @@ class imp_stringToListNode:
             s = str(combined_string)
 
         if comment_prefix:
-            s = "\n".join(line for line in s.splitlines() if not line.lstrip().startswith(comment_prefix))
+            processed = []
+            for line in s.splitlines():
+                if line.lstrip().startswith(comment_prefix):
+                    continue
+                idx = line.find(comment_prefix)
+                if idx != -1:
+                    line = line[:idx]
+                processed.append(line)
+            s = "\n".join(processed)
 
         if delimiter == "comma":
             delim = ","
@@ -2648,6 +2656,48 @@ class imp_stringToFloatNode:
     FUNCTION = "stringToFloat"
     CATEGORY = "🐝TinyBee/Casting"
 
+class imp_floatToStringNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "float": ("FLOAT", {"default": 0.0}),
+                "width": ("INT", {"default": 0, "min": 0, "max": 64}),
+                "precision": ("INT", {"default": -1, "min": -1, "max": 17}),
+            }
+        }
+
+    @staticmethod
+    def floatToString(float, width, precision):
+        value = _unwrap_single_value(float)
+        width_value = int(_unwrap_single_value(width))
+        precision_value = int(_unwrap_single_value(precision))
+
+        if precision_value >= 0:
+            formatted = f"{value:.{precision_value}f}"
+        else:
+            formatted = str(value)
+
+        # Pad the digits before the decimal (excluding the sign) to meet width
+        if width_value > 0:
+            negative = formatted.startswith("-")
+            abs_str = formatted.lstrip("-")
+            dot_pos = abs_str.find(".")
+            digits_before = dot_pos if dot_pos >= 0 else len(abs_str)
+            if digits_before < width_value:
+                abs_str = abs_str.zfill(len(abs_str) + (width_value - digits_before))
+            formatted = f"-{abs_str}" if negative else abs_str
+
+        return (formatted,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "floatToString"
+    CATEGORY = "🐝TinyBee/Casting"
+
 class imp_isStringEmptyNode:
     def __init__(self):
         pass
@@ -4133,6 +4183,7 @@ NODE_CLASS_MAPPINGS = {
     "Int to Leading String": imp_intToLeadingStringNode,
     "String to Int": imp_stringToIntNode,
     "String to Float": imp_stringToFloatNode,
+    "Float to String": imp_floatToStringNode,
     "None Image": imp_noneImgConstNode,
     "Float Compare": imp_floatCompareNode,
     "Int Compare": imp_intCompareNode,

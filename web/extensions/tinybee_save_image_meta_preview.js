@@ -12,80 +12,102 @@ function buildViewUrl(img) {
   return api.apiURL(`/view?${params}`)
 }
 
+// Returns the Y coordinate of the bottom edge of all visible widgets.
+// onDrawBackground is called before drawNodeWidgets, so widget.y values come
+// from the previous frame's layout pass. On the very first frame we fall back
+// to estimating from the widget count.
+function getWidgetsBottom(node) {
+  const startY = node.widgets_start_y ?? LiteGraph.NODE_TITLE_HEIGHT ?? 30
+
+  if (!node.widgets || node.widgets.length === 0) return startY
+
+  let maxBottom = startY
+  let anyHadY = false
+
+  for (const w of node.widgets) {
+    if (w.hidden) continue
+    if (w.y != null) {
+      anyHadY = true
+      const h = w.computedHeight ?? LiteGraph.NODE_WIDGET_HEIGHT ?? 20
+      maxBottom = Math.max(maxBottom, w.y + h)
+    }
+  }
+
+  if (!anyHadY) {
+    // First-frame fallback: estimate from widget count
+    const widgetH = (LiteGraph.NODE_WIDGET_HEIGHT ?? 20) + 4
+    maxBottom = startY + node.widgets.length * widgetH
+  }
+
+  return maxBottom
+}
+
 app.registerExtension({
   name: 'TinyBee.SaveImageWithMetaPreview',
 
   async beforeConfigureGraph() {
-    const nodeType = LiteGraph.registered_node_types[NODE_NAME];
-    
+    const nodeType = LiteGraph.registered_node_types[NODE_NAME]
+
     if (nodeType) {
-      // Ensure the engine serializes this node's visual layer
-      nodeType.prototype.getCanvasMenuOptions = function(options) {
-        // This forces ComfyUI to see this node as eligible for subgraph promotion
-        this.isVirtualNode = false;
-      };
+      nodeType.prototype.getCanvasMenuOptions = function (options) {
+        this.isVirtualNode = false
+      }
 
       nodeType.prototype.onExecuted = function (message) {
-        const images = message?.images;
-        if (!images?.length) return;
+        const images = message?.images
+        if (!images?.length) return
 
-        this.imgs = images.map(img => {
-          const el = new Image();
-          el.src = buildViewUrl(img);
-          el.onload = () => app.graph?.setDirtyCanvas(true, true);
-          return el;
-        });
+        this.imgs = images.map((img) => {
+          const el = new Image()
+          el.src = buildViewUrl(img)
+          el.onload = () => app.graph?.setDirtyCanvas(true, true)
+          return el
+        })
 
-        this.imageIndex = 0;
-        app.graph?.setDirtyCanvas(true, true);
-      };
+        this.imageIndex = 0
+        app.graph?.setDirtyCanvas(true, true)
+      }
 
-      // Proportional aspect-ratio fitting
-      nodeType.prototype.onDrawBackground = function(ctx) {
-        if (!this.imgs || this.imgs.length === 0) return;
-        
-        const img = this.imgs[this.imageIndex || 0];
-        if (!img || !img.complete) return;
-        
-        const margin = 10;
-        const top_offset = this.widgets_start_y || 60;
-        
-        // Max allowable bounds
-        const max_w = this.size[0] - margin * 2;
-        const max_h = this.size[1] - top_offset - margin;
-        
-        if (max_w <= 0 || max_h <= 0) return;
+      nodeType.prototype.onDrawBackground = function (ctx) {
+        if (!this.imgs || this.imgs.length === 0) return
 
-        // Calculate aspect ratios
-        const imgRatio = img.width / img.height;
-        const targetRatio = max_w / max_h;
-        
-        let draw_w = max_w;
-        let draw_h = max_h;
-        
+        const img = this.imgs[this.imageIndex || 0]
+        if (!img || !img.complete) return
+
+        const margin = 10
+        // Start the image below all visible widgets, not at the top of them
+        const top_offset = getWidgetsBottom(this) + margin
+
+        const max_w = this.size[0] - margin * 2
+        const max_h = this.size[1] - top_offset - margin
+
+        if (max_w <= 0 || max_h <= 0) return
+
+        const imgRatio = img.width / img.height
+        const targetRatio = max_w / max_h
+
+        let draw_w = max_w
+        let draw_h = max_h
+
         if (imgRatio > targetRatio) {
-          // Image is wider than target area bounds
-          draw_h = max_w / imgRatio;
+          draw_h = max_w / imgRatio
         } else {
-          // Image is taller than target area bounds
-          draw_w = max_h * imgRatio;
+          draw_w = max_h * imgRatio
         }
-        
-        // Center the image within the bounding box dynamically
-        const offset_x = margin + (max_w - draw_w) / 2;
-        const offset_y = top_offset + (max_h - draw_h) / 2;
-        
-        ctx.save();
-        ctx.drawImage(img, offset_x, offset_y, draw_w, draw_h);
-        ctx.restore();
-      };
+
+        const offset_x = margin + (max_w - draw_w) / 2
+        const offset_y = top_offset + (max_h - draw_h) / 2
+
+        ctx.save()
+        ctx.drawImage(img, offset_x, offset_y, draw_w, draw_h)
+        ctx.restore()
+      }
     }
   },
 
   nodeCreated(node) {
-    if (node.comfyClass !== NODE_NAME && node.type !== NODE_NAME) return;
-    node.isVirtualNode = false;
-    // Tell the wrapper compilation model to look for visual data here
-    node.show_canvas_preview = true; 
-  }
-});
+    if (node.comfyClass !== NODE_NAME && node.type !== NODE_NAME) return
+    node.isVirtualNode = false
+    node.show_canvas_preview = true
+  },
+})
