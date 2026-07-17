@@ -2551,6 +2551,53 @@ class imp_autoSeedNode:
     FUNCTION = "autoSeed"
     CATEGORY = "🐝TinyBee/Util"
 
+
+class imp_intToFloatNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "integer": ("INT", {"default": 0, "min": -2147483648, "max": 2147483647}),
+            }
+        }
+
+    @staticmethod
+    def intToFloat(integer):
+        """Convert integer to float."""
+        return (float(integer),)
+
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("float",)
+    FUNCTION = "intToFloat"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+class imp_floatToIntNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "float": ("FLOAT", {"default": 0.0}),
+            }
+        }
+
+    @staticmethod
+    def floatToInt(float):
+        """Convert float to integer by truncating the decimal part."""
+        return (int(float),)
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("integer",)
+    FUNCTION = "floatToInt"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
 class imp_intToBoolNode:
     def __init__(self):
         pass
@@ -3234,6 +3281,111 @@ class imp_sequenceNode:
     FUNCTION = "sequence"
     CATEGORY = "🐝TinyBee/Util"
 
+class imp_padImageInPlaceNode:
+    PADDING_COLORS = {
+        "black": "#000000ff",
+        "white": "#ffffffff",
+        "Neutral": "#7f7f7fff",
+        "Clear": "#ffffff00",
+    }
+
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "top": ("INT", {"default": 0, "min": 0, "max": 100000}),
+                "left": ("INT", {"default": 0, "min": 0, "max": 100000}),
+                "right": ("INT", {"default": 0, "min": 0, "max": 100000}),
+                "bottom": ("INT", {"default": 0, "min": 0, "max": 100000}),
+                "padding_color": (list(cls.PADDING_COLORS.keys()), {"default": "black"}),
+                "scaleToOriginal": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    @staticmethod
+    def _hex_to_rgba(hex_str):
+        h = hex_str.lstrip("#")
+        r = int(h[0:2], 16) / 255.0
+        g = int(h[2:4], 16) / 255.0
+        b = int(h[4:6], 16) / 255.0
+        a = int(h[6:8], 16) / 255.0 if len(h) >= 8 else 1.0
+        return (r, g, b, a)
+
+    @staticmethod
+    def padImageInPlace(image, top, left, right, bottom, padding_color, scaleToOriginal=True):
+        top = max(0, int(_unwrap_single_value(top)))
+        left = max(0, int(_unwrap_single_value(left)))
+        right = max(0, int(_unwrap_single_value(right)))
+        bottom = max(0, int(_unwrap_single_value(bottom)))
+        color_name = _unwrap_single_value(padding_color)
+        scale_to_original = bool(_unwrap_single_value(scaleToOriginal))
+
+        batch = _normalize_image_batch(image)
+        if batch.numel() == 0 or batch.shape[1] == 0 or batch.shape[2] == 0:
+            return (batch, 1.0)
+
+        B, H, W, C = batch.shape
+
+        r, g, b, a = imp_padImageInPlaceNode._hex_to_rgba(
+            imp_padImageInPlaceNode.PADDING_COLORS.get(color_name, "#000000ff")
+        )
+        rgba = (r, g, b, a)
+        if C <= 4:
+            color = torch.tensor(rgba[:C], dtype=batch.dtype)
+        else:
+            color = torch.zeros((C,), dtype=batch.dtype)
+
+        padded_width = W + left + right
+        padded_height = H + top + bottom
+
+        # Add equal padding to whichever pair of opposite sides is needed to
+        # restore the original aspect ratio.
+        original_aspect = W / H
+        extra_left = extra_right = extra_top = extra_bottom = 0.0
+        current_aspect = padded_width / padded_height
+        if current_aspect > original_aspect:
+            required_height = padded_width / original_aspect
+            extra = max(0.0, required_height - padded_height)
+            extra_top = extra_bottom = extra / 2.0
+        elif current_aspect < original_aspect:
+            required_width = padded_height * original_aspect
+            extra = max(0.0, required_width - padded_width)
+            extra_left = extra_right = extra / 2.0
+
+        final_left = left + int(round(extra_left))
+        final_right = right + int(round(extra_right))
+        final_top = top + int(round(extra_top))
+        final_bottom = bottom + int(round(extra_bottom))
+
+        final_width = W + final_left + final_right
+        final_height = H + final_top + final_bottom
+
+        canvas = torch.empty((B, final_height, final_width, C), dtype=batch.dtype)
+        canvas[:] = color
+        canvas[:, final_top:final_top + H, final_left:final_left + W, :] = batch
+
+        if scale_to_original:
+            scale = W / float(final_width) if final_width > 0 else 1.0
+            canvas_chw = canvas.permute(0, 3, 1, 2)
+            resized = torch.nn.functional.interpolate(
+                canvas_chw, size=(H, W), mode="bilinear", align_corners=False, antialias=True
+            )
+            output = resized.permute(0, 2, 3, 1).contiguous()
+            return (output, float(scale))
+
+        scale = final_width / float(W) if W > 0 else 1.0
+        return (canvas, float(scale))
+
+    RETURN_TYPES = ("IMAGE", "FLOAT")
+    RETURN_NAMES = ("image", "scale")
+    FUNCTION = "padImageInPlace"
+    CATEGORY = "🐝TinyBee/Images"
+
+
 class imp_interpolateFramesNode:
     def __init__(self):
         pass
@@ -3616,6 +3768,50 @@ class imp_saveImageBatchToZipNode:
     FUNCTION = "saveImageBatchToZip"
     OUTPUT_NODE = True
     CATEGORY = "🐝TinyBee/Queue"
+
+
+class imp_saveStringToFileNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "filepath": ("STRING", {"default": "", "forceInput": False}),
+                "exists_behavior": (["Overwrite", "Append", "Ignore"], {"default": "Overwrite"}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # This node has file-system side effects and should always run when queued.
+        return float("NaN")
+
+    @staticmethod
+    def saveStringToFile(string, filepath, exists_behavior):
+        if not filepath.strip():
+            return ()
+
+        file_exists = os.path.exists(filepath)
+        if file_exists and exists_behavior == "Ignore":
+            return ()
+
+        parent_dir = os.path.dirname(filepath)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
+        mode = "a" if file_exists and exists_behavior == "Append" else "w"
+        with open(filepath, mode, encoding="utf-8") as f:
+            f.write(string)
+
+        return ()
+
+    RETURN_TYPES = ()
+    FUNCTION = "saveStringToFile"
+    OUTPUT_NODE = True
+    CATEGORY = "🐝TinyBee/Util"
 
 
 class imp_saveImageWithMetaNode:
@@ -4014,6 +4210,11 @@ class imp_jsonParserNode:
         pass
 
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # This node has file-system side effects and should always run when queued.
+        return float("NaN")
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
@@ -4065,6 +4266,28 @@ class imp_jsonParserNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("result",)
     FUNCTION = "parseJson"
+    CATEGORY = "🐝TinyBee/Strings"
+
+
+class imp_jsonInputNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+            }
+        }
+
+    @staticmethod
+    def passthrough(json):
+        return (json,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("json",)
+    FUNCTION = "passthrough"
     CATEGORY = "🐝TinyBee/Strings"
 
 
@@ -4177,6 +4400,7 @@ NODE_CLASS_MAPPINGS = {
     "Is String Empty": imp_isStringEmptyNode,
     "Sanitize File Path": imp_sanitizeFilePathNode,
     "String Combiner": imp_stringCombinerNode,
+    "Json Input": imp_jsonInputNode,
 
     # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
@@ -4188,6 +4412,8 @@ NODE_CLASS_MAPPINGS = {
     "Float Compare": imp_floatCompareNode,
     "Int Compare": imp_intCompareNode,
     "String Compare": imp_stringCompareNode,
+    "Float to Int": imp_floatToIntNode,
+    "Int to Float": imp_intToFloatNode,
 
     # Rectangle Nodes
     "Rect to Floats": imp_rectToFloatsNode,
@@ -4204,6 +4430,7 @@ NODE_CLASS_MAPPINGS = {
     "Randomize Image Batch": imp_randomizeImageBatchNode,
     "Images From Batch": imp_imagesFromBatchNode,
     "Save Image Batch to Zip": imp_saveImageBatchToZipNode,
+    "Save String to File": imp_saveStringToFileNode,
     "Save Image w/Meta": imp_saveImageWithMetaNode,
     "Load Image w/Meta": imp_loadImageWithMetaNode,
     "Load Image Batch from Zip": imp_loadImageBatchFromZipNode,
@@ -4213,6 +4440,9 @@ NODE_CLASS_MAPPINGS = {
     "Prop From Properties": imp_getPropertyFromPropertiesNode,
     "Json From Properties": imp_getJsonFromPropertiesNode,
 
+
+    # Image Nodes
+    "Pad Image In Place": imp_padImageInPlaceNode,
     "Interpolate Frames": imp_interpolateFramesNode,
 }
 
