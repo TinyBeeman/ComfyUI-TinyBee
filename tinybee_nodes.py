@@ -3,6 +3,7 @@ import random
 import glob
 import re
 import json
+import math
 json_lib = json  # alias for nodes where 'json' is a local parameter name
 import csv as csvlib
 import hashlib
@@ -77,6 +78,29 @@ def _normalize_image_batch(images):
         batch = batch.unsqueeze(0)
 
     return batch
+
+
+def _florence2_extract_bboxes_labels(data):
+    """Extract parallel (bboxes, labels) lists from a Florence2 grounding-style JSON payload.
+
+    Accepts a JSON string, a list containing one dict (the typical Florence2
+    CAPTION_TO_PHRASE_GROUNDING shape), or the dict itself.
+    """
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = []
+
+    entry = {}
+    if isinstance(data, (list, tuple)) and len(data) > 0 and isinstance(data[0], dict):
+        entry = data[0]
+    elif isinstance(data, dict):
+        entry = data
+
+    bboxes = entry.get("bboxes", []) if isinstance(entry, dict) else []
+    labels = entry.get("labels", []) if isinstance(entry, dict) else []
+    return bboxes, labels
 
 
 # ===========================================================================
@@ -2125,6 +2149,15 @@ class imp_selectBoundingBoxNode:
         def area(b):
             return max(0, (b[2]-b[0])) * max(0, (b[3]-b[1]))
 
+        # Avoid selecting a bbox that covers essentially the entire image (e.g. a
+        # "person"/"scene" detection returned alongside a tighter one) unless it's
+        # the only candidate available.
+        img_area = float(img_w) * float(img_h)
+        if img_area > 0:
+            non_full_image_bboxes = [b for b in selected_bboxes if area(b) < 0.95 * img_area]
+            if non_full_image_bboxes:
+                selected_bboxes = non_full_image_bboxes
+
         chosen = selected_bboxes[0]
         if method == "biggest" and selected_bboxes:
             chosen = max(selected_bboxes, key=area)
@@ -2279,6 +2312,130 @@ class imp_getMaskBoundingBoxNode:
 
         return (bbox_mask, x_min, y_min, width, height)
 
+
+class imp_florence2CaptionDataParserNode:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "data": ("JSON",),
+                "image": ("IMAGE",),
+                "include": ("STRING", {"default": "", "forceInput": False}),
+                "exclude": ("STRING", {"default": "", "forceInput": False}),
+                "AllowEmpty": ("BOOLEAN", {"default": False, "label_on": "Allow Empty", "label_off": "Fallback to Full Image"}),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "TINYRECT")
+    RETURN_NAMES = ("mask", "tinyrect")
+    FUNCTION = "parse"
+    CATEGORY = "🐝TinyBee/Util"
+
+    @staticmethod
+    def _label_set(value):
+        if not value:
+            return set()
+        return {tok.strip().lower() for tok in value.split(",") if tok.strip()}
+
+    @staticmethod
+    def _rasterize(bbox, target, w, h):
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+            return
+        x1, y1, x2, y2 = bbox
+        x0 = max(0, min(w, int(round(min(x1, x2)))))
+        x1r = max(0, min(w, int(round(max(x1, x2)))))
+        y0 = max(0, min(h, int(round(min(y1, y2)))))
+        y1r = max(0, min(h, int(round(max(y1, y2)))))
+        if x1r > x0 and y1r > y0:
+            target[y0:y1r, x0:x1r] = True
+
+    @staticmethod
+    def parse(data, image, include, exclude, AllowEmpty=False):
+        batch = _normalize_image_batch(image)
+        h = int(batch.shape[1])
+        w = int(batch.shape[2])
+
+        bboxes, labels = _florence2_extract_bboxes_labels(data)
+
+        include_set = imp_florence2CaptionDataParserNode._label_set(include)
+        exclude_set = imp_florence2CaptionDataParserNode._label_set(exclude)
+
+        include_mask = torch.zeros((h, w), dtype=torch.bool)
+        exclude_mask = torch.zeros((h, w), dtype=torch.bool)
+
+        matched_include = False
+        for bbox, label in zip(bboxes, labels):
+            label_norm = str(label).strip().lower()
+            if include_set and label_norm in include_set:
+                imp_florence2CaptionDataParserNode._rasterize(bbox, include_mask, w, h)
+                matched_include = True
+
+        if not matched_include and not AllowEmpty:
+            include_mask[:, :] = True
+
+        for bbox, label in zip(bboxes, labels):
+            label_norm = str(label).strip().lower()
+            if exclude_set and label_norm in exclude_set:
+                imp_florence2CaptionDataParserNode._rasterize(bbox, exclude_mask, w, h)
+
+        final_mask = include_mask & (~exclude_mask)
+        mask_tensor = final_mask.to(dtype=torch.float32).unsqueeze(0)  # [1, H, W]
+
+        if torch.any(final_mask):
+            ys, xs = torch.where(final_mask)
+            x_min = int(xs.min().item())
+            x_max = int(xs.max().item())
+            y_min = int(ys.min().item())
+            y_max = int(ys.max().item())
+            tinyrect = (float(x_min), float(y_min), float(x_max - x_min + 1), float(y_max - y_min + 1))
+        else:
+            tinyrect = (0.0, 0.0, 0.0, 0.0)
+
+        return (mask_tensor, tinyrect)
+
+
+class imp_combineFlorence2CaptionDataNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                "data1": ("JSON", {"default": None}),
+                "data2": ("JSON", {"default": None}),
+                "data3": ("JSON", {"default": None}),
+                "data4": ("JSON", {"default": None}),
+                "data5": ("JSON", {"default": None}),
+                "data6": ("JSON", {"default": None}),
+                "data7": ("JSON", {"default": None}),
+                "data8": ("JSON", {"default": None}),
+            }
+        }
+
+    RETURN_TYPES = ("JSON",)
+    RETURN_NAMES = ("data",)
+    FUNCTION = "combine"
+    CATEGORY = "🐝TinyBee/Util"
+
+    @staticmethod
+    def combine(data1=None, data2=None, data3=None, data4=None, data5=None, data6=None, data7=None, data8=None):
+        combined_bboxes = []
+        combined_labels = []
+        for data in (data1, data2, data3, data4, data5, data6, data7, data8):
+            if not data:
+                continue
+            bboxes, labels = _florence2_extract_bboxes_labels(data)
+            for bbox, label in zip(bboxes, labels):
+                combined_bboxes.append(bbox)
+                combined_labels.append(label)
+
+        # Stable sort by label so equal labels keep their combine-order among themselves,
+        # while bboxes are reordered in lockstep to stay matched to their label.
+        order = sorted(range(len(combined_labels)), key=lambda i: str(combined_labels[i]).strip().lower())
+        sorted_bboxes = [combined_bboxes[i] for i in order]
+        sorted_labels = [combined_labels[i] for i in order]
+
+        return ([{"bboxes": sorted_bboxes, "labels": sorted_labels}],)
+
+
 class imp_faceBodyAspectBoundsNode:
     def __init__(self):
         pass
@@ -2296,53 +2453,217 @@ class imp_faceBodyAspectBoundsNode:
                 "body_width": ("INT", {"default": 256, "min": 1, "max": 10000}),
                 "body_height": ("INT", {"default": 512, "min": 1, "max": 10000}),
                 "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+                "exceedBounds": ("BOOLEAN", {"default": False}),
+                "ensureUpperBodyPct": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "image_width": ("INT", {"default": 512, "min": 1, "max": 10000}),
+                "image_height": ("INT", {"default": 512, "min": 1, "max": 10000}),
             }
         }
 
     @staticmethod
     def faceBodyAspectBounds(face_x, face_y, face_width, face_height,
                              body_x, body_y, body_width, body_height,
-                             aspect_ratio):
+                             aspect_ratio, exceedBounds, ensureUpperBodyPct, image_width, image_height):
         # We have a body bounding box, and a face bounding box within it.
         # The face box is relative to the body box's x and y (top left corner).
         # We want to adjust the body box to the desired aspect ratio, while ensuring
         # the face box remains fully inside the new body box.
-        # We do NOT want to change the body_height, only the width.
-        # If we can, we will center the new bounding box around the face box.
-        # It is fine if we need to shift the body box's x or grow it's width
-        # to ensure the face box fits.
-        
-        # Calculate the new width based on the desired aspect ratio and body height
-        new_width = body_height * aspect_ratio
-        
+        # If we can, we will position the new bounding box so the face keeps the
+        # same relative position (fraction of width/height) it had within the
+        # original body box - this avoids assuming the face is dead-centered and
+        # keeps natural headroom regardless of orientation.
+        # It is fine if we need to shift the body box's x/y to ensure the face fits.
+        # If exceedBounds is set, we're also willing to grow body_height (and the
+        # derived width) beyond the original body box - and let new_body_x/new_body_y
+        # go negative - rather than cropping the face when it doesn't fit.
+
         # Calculate the absolute position of the face box
         abs_face_x = body_x + face_x
         abs_face_right = abs_face_x + face_width
-        
+        abs_face_y = body_y + face_y
+        abs_face_bottom = abs_face_y + face_height
+
         # Calculate the center of the face box
         face_center_x = abs_face_x + (face_width / 2.0)
-        
-        # Try to center the new body box around the face center
-        new_body_x = face_center_x - (new_width / 2.0)
-        
-        # Ensure the face box is fully contained within the new body box
-        # Check if face left edge is inside
-        if abs_face_x < new_body_x:
-            new_body_x = abs_face_x
-        
-        # Check if face right edge is inside
-        if abs_face_right > (new_body_x + new_width):
-            new_body_x = abs_face_right - new_width
-        
-        # Prevent body_x from going negative (assuming 0 is the left edge of the image)
-        if new_body_x < 0:
-            new_body_x = 0
+        face_center_y = abs_face_y + (face_height / 2.0)
 
-        # Calculate the new face bounding box (relative to the new body position)
-        # Since face box is relative to body box, we need to adjust face_x based on body_x change
-        new_face_x = abs_face_x - new_body_x
-        new_face_y = face_y  # y position doesn't change since body_y doesn't change
-        
+        # Preserve the face's relative position within the original body box,
+        # rather than assuming it should be dead-centered.
+        frac_x = 0.5 if body_width <= 0 else (face_center_x - body_x) / body_width
+        frac_y = 0.5 if body_height <= 0 else (face_center_y - body_y) / body_height
+        frac_x = min(max(frac_x, 0.0), 1.0)
+        frac_y = min(max(frac_y, 0.0), 1.0)
+
+        # Direction + real-image-slack for each axis, computed once so both the
+        # size formula below and the growth branches further down can reuse them.
+        grow_right_first = frac_x <= 0.5  # face nearer the left -> body extends right
+        if grow_right_first:
+            x_primary_slack = max(0.0, image_width - (body_x + body_width))
+            x_secondary_slack = max(0.0, body_x)
+        else:
+            x_primary_slack = max(0.0, body_x)
+            x_secondary_slack = max(0.0, image_width - (body_x + body_width))
+
+        grow_down_first = frac_y <= 0.5  # face nearer the top -> body extends down
+        if grow_down_first:
+            y_primary_slack = max(0.0, image_height - (body_y + body_height))
+            y_secondary_slack = max(0.0, body_y)
+        else:
+            y_primary_slack = max(0.0, body_y)
+            y_secondary_slack = max(0.0, image_height - (body_y + body_height))
+
+        # Which axis is "the body direction" - based on the body box's own shape
+        # (taller than wide -> upright, body extends vertically; wider than tall
+        # -> reclining, body extends horizontally). This is far more robust than
+        # comparing how off-center the face is on each axis: for a normal upright
+        # photo, frac_x and frac_y are often nearly equally (im)balanced (the face
+        # is rarely dead-center on either axis), so that comparison can flip on
+        # essentially noise. Body shape is a direct, stable signal of orientation.
+        # Only flip to "X is the body axis" when the box is CLEARLY wider than
+        # tall (>20% wider) - a near-square box defaults to vertical, since an
+        # upright person is by far the more common case and a near-square body
+        # box is much more likely to be an imprecise upright detection than an
+        # actual reclining pose. Used both by ensureUpperBodyPct below and by the
+        # growth branches further down, to decide how unavoidable padding on the
+        # *other* (non-body) axis should be distributed.
+        body_axis_is_y = body_width <= body_height * 1.2
+
+        # Calculate the new height/width based on the desired aspect ratio.
+        # face_fit_height is the smallest aspect-correct height that can still
+        # fully contain the face (the derived width, face_fit_height * aspect_ratio,
+        # is then automatically >= face_width too).
+        face_fit_height = max(face_height, face_width / aspect_ratio)
+        if exceedBounds:
+            # Never smaller than the original body box - grow past it if the face
+            # needs more room than that, instead of cropping it.
+            new_height = max(body_height, face_fit_height)
+        else:
+            # Never larger than the original body box - shrink toward a snug fit
+            # around the face. If the face doesn't fit even at body_height, we stay
+            # capped at body_height and accept cropping (the exceedBounds alternative).
+            new_height = min(body_height, face_fit_height)
+        new_width = new_height * aspect_ratio
+
+        # ensureUpperBodyPct: try to guarantee at least ensureUpperBodyPct * face_size
+        # of room beyond the face in the body direction (body_axis_is_y above) -
+        # this generalizes beyond "upright" poses (e.g. a reclining subject where
+        # the body extends sideways instead of downward). Ignored when
+        # exceedBounds is off.
+        def _dry_run_split(extra, primary_slack, secondary_slack):
+            # Mirrors the primary/secondary/pad distribution used by the growth
+            # branches below, without needing to run the full thing.
+            primary_growth = min(extra, primary_slack)
+            remaining = extra - primary_growth
+            secondary_growth = min(remaining, secondary_slack)
+            remaining -= secondary_growth
+            primary_growth += remaining
+            return primary_growth, secondary_growth
+
+        ensure_active = exceedBounds and ensureUpperBodyPct > 0.0
+        ensure_axis_is_y = body_axis_is_y
+        y_topup = 0.0
+        x_topup = 0.0
+        y_dry_secondary = 0.0
+        x_dry_secondary = 0.0
+
+        if ensure_active:
+            if ensure_axis_is_y:
+                # new_height already has an unconditional floor of body_height
+                # (from the max() above), so this axis is always in the growth
+                # regime whenever exceedBounds is on - the dry run below reflects
+                # real (not shrink-branch) behavior.
+                original_side_space = (body_height - (face_y + face_height)) if grow_down_first else face_y
+                target_growth = max(0.0, ensureUpperBodyPct * face_height - original_side_space)
+                generic_extra_height = new_height - body_height
+                y_dry_primary, y_dry_secondary = _dry_run_split(generic_extra_height, y_primary_slack, y_secondary_slack)
+                y_topup = max(0.0, target_growth - y_dry_primary)
+            else:
+                # Unlike new_height, new_width has no unconditional floor of
+                # body_width (it's purely new_height * aspect_ratio) - add one
+                # here so this axis is guaranteed to be in the growth regime too,
+                # otherwise the shrink/reposition branch below (which doesn't
+                # track any specific gap) could undo the guarantee.
+                new_height = max(new_height, body_width / aspect_ratio)
+                new_width = new_height * aspect_ratio
+
+                original_side_space = (body_width - (face_x + face_width)) if grow_right_first else face_x
+                target_growth = max(0.0, ensureUpperBodyPct * face_width - original_side_space)
+                generic_extra_width = new_width - body_width
+                x_dry_primary, x_dry_secondary = _dry_run_split(generic_extra_width, x_primary_slack, x_secondary_slack)
+                x_topup = max(0.0, target_growth - x_dry_primary)
+
+        # Apply the top-up, keeping width/height locked to aspect_ratio: growing
+        # one requires proportionally growing the other to match.
+        new_height += y_topup + (x_topup / aspect_ratio)
+        new_width = new_height * aspect_ratio
+
+        if new_width <= body_width:
+            # Shrink/reposition path (default, or exceedBounds without needing
+            # growth): keep the face at the same relative position it had in
+            # the original body box.
+            new_body_x = face_center_x - (frac_x * new_width)
+
+            # Ensure the face box is fully contained within the new body box
+            if abs_face_x < new_body_x:
+                new_body_x = abs_face_x
+            if abs_face_right > (new_body_x + new_width):
+                new_body_x = abs_face_right - new_width
+
+            if not exceedBounds and new_body_x < 0:
+                new_body_x = 0
+        else:
+            # Growth path (exceedBounds only).
+            extra_width = new_width - body_width
+
+            if ensure_active and not ensure_axis_is_y:
+                # X is the ensure axis: keep the dry-run secondary growth as-is,
+                # and put all additional growth (including the top-up) on primary,
+                # so growth is deliberately one-sided (away from the face).
+                secondary_growth = x_dry_secondary
+                primary_growth = extra_width - secondary_growth
+                left_growth, _right_growth = (secondary_growth, primary_growth) if grow_right_first else (primary_growth, secondary_growth)
+                new_body_x = body_x - left_growth
+                # new_width already equals body_width + left_growth + right_growth by
+                # construction; the original body box already contains the face, and we
+                # only ever extend outward from it here, so containment is automatic.
+            else:
+                # X has no reason here to favor one side (it isn't the axis
+                # ensureUpperBodyPct is targeting) - keep the face at the same
+                # relative fraction it had before growth, i.e. split the growth
+                # left/right in proportion frac_x : (1 - frac_x). This is the
+                # same formula as the shrink/reposition branch above; growth
+                # amounts are both >= 0 since frac_x is clamped to [0, 1], so
+                # face containment stays automatic.
+                new_body_x = face_center_x - (frac_x * new_width)
+
+        if new_height <= body_height:
+            new_body_y = face_center_y - (frac_y * new_height)
+
+            if abs_face_y < new_body_y:
+                new_body_y = abs_face_y
+            if abs_face_bottom > (new_body_y + new_height):
+                new_body_y = abs_face_bottom - new_height
+
+            if not exceedBounds and new_body_y < 0:
+                new_body_y = 0
+        else:
+            extra_height = new_height - body_height
+
+            if ensure_active and ensure_axis_is_y:
+                # Y is the ensure axis: keep the dry-run secondary growth as-is,
+                # and put all additional growth (including the top-up) on primary,
+                # so growth is deliberately one-sided (away from the face).
+                secondary_growth = y_dry_secondary
+                primary_growth = extra_height - secondary_growth
+                top_growth, _bottom_growth = (secondary_growth, primary_growth) if grow_down_first else (primary_growth, secondary_growth)
+                new_body_y = body_y - top_growth
+            else:
+                # Y has no reason here to favor one side (it isn't the axis
+                # ensureUpperBodyPct is targeting) - keep the face at the same
+                # relative fraction it had before growth, same formula as the
+                # shrink/reposition branch above.
+                new_body_y = face_center_y - (frac_y * new_height)
+
         # Adjust face dimensions to match the aspect ratio
         # Only grow the box, never shrink it - grow in all directions evenly
         new_face_width = face_width
@@ -2365,76 +2686,98 @@ class imp_faceBodyAspectBoundsNode:
         # Calculate the amount of growth needed in each dimension
         width_growth = new_face_width - face_width
         height_growth = new_face_height - face_height
-        
-        # Calculate the absolute position of the current face box
-        abs_face_y = body_y + face_y
-        abs_face_bottom = abs_face_y + face_height
-        
-        # Calculate the center of the face box
-        face_center_y = abs_face_y + (face_height / 2.0)
-        
+
         # Try to grow evenly in all directions (half growth on each side)
         # For horizontal growth
         left_growth = width_growth / 2.0
         right_growth = width_growth / 2.0
-        
+
         # For vertical growth
         top_growth = height_growth / 2.0
         bottom_growth = height_growth / 2.0
-        
-        # Check constraints against body box and adjust growth distribution
+
+        # Check constraints against the new body box and adjust growth distribution,
+        # so the returned face box always stays fully inside the returned body box.
         # Horizontal constraints
         new_face_left = abs_face_x - left_growth
         new_face_right = abs_face_x + face_width + right_growth
-        
-        # If we exceed body box on the left, shift growth to the right
-        if new_face_left < body_x:
-            excess = body_x - new_face_left
+
+        # If we exceed the new body box on the left, shift growth to the right
+        if new_face_left < new_body_x:
+            excess = new_body_x - new_face_left
             left_growth -= excess
             right_growth += excess
-            new_face_left = body_x
+            new_face_left = new_body_x
             new_face_right = abs_face_x + face_width + right_growth
-        
-        # If we exceed body box on the right, shift growth to the left
-        if new_face_right > (body_x + body_width):
-            excess = new_face_right - (body_x + body_width)
+
+        # If we exceed the new body box on the right, shift growth to the left
+        if new_face_right > (new_body_x + new_width):
+            excess = new_face_right - (new_body_x + new_width)
             right_growth -= excess
             left_growth += excess
-            new_face_right = body_x + body_width
+            new_face_right = new_body_x + new_width
             new_face_left = abs_face_x - left_growth
-        
+
         # Vertical constraints
         new_face_top = abs_face_y - top_growth
         new_face_bottom = abs_face_y + face_height + bottom_growth
-        
-        # If we exceed body box on the top, shift growth to the bottom
-        if new_face_top < body_y:
-            excess = body_y - new_face_top
+
+        # If we exceed the new body box on the top, shift growth to the bottom
+        if new_face_top < new_body_y:
+            excess = new_body_y - new_face_top
             top_growth -= excess
             bottom_growth += excess
-            new_face_top = body_y
+            new_face_top = new_body_y
             new_face_bottom = abs_face_y + face_height + bottom_growth
-        
-        # If we exceed body box on the bottom, shift growth to the top
-        if new_face_bottom > (body_y + body_height):
-            excess = new_face_bottom - (body_y + body_height)
+
+        # If we exceed the new body box on the bottom, shift growth to the top
+        if new_face_bottom > (new_body_y + new_height):
+            excess = new_face_bottom - (new_body_y + new_height)
             bottom_growth -= excess
             top_growth += excess
-            new_face_bottom = body_y + body_height
+            new_face_bottom = new_body_y + new_height
             new_face_top = abs_face_y - top_growth
-        
+
         # Calculate final face box position and dimensions
         final_abs_face_x = abs_face_x - left_growth
         final_abs_face_y = abs_face_y - top_growth
         final_face_width = face_width + left_growth + right_growth
         final_face_height = face_height + top_growth + bottom_growth
-        
-        # Return absolute coordinates for face box (not relative to body box)
-        return (int(round(new_body_x)), int(round(body_y)), int(round(new_width)), int(round(body_height)), 
-                int(round(final_abs_face_x)), int(round(final_abs_face_y)), int(round(final_face_width)), int(round(final_face_height)))
 
-    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("body_x", "body_y", "body_width", "body_height", "face_x", "face_y", "face_width", "face_height")
+        print("=== Face Body Aspect Bounds debug ===")
+        print(f"inputs: face=({face_x},{face_y},{face_width},{face_height}) "
+              f"body=({body_x},{body_y},{body_width},{body_height}) "
+              f"aspect_ratio={aspect_ratio} exceedBounds={exceedBounds} "
+              f"ensureUpperBodyPct={ensureUpperBodyPct} image=({image_width}x{image_height})")
+        print(f"abs_face: x={abs_face_x} right={abs_face_right} y={abs_face_y} bottom={abs_face_bottom} "
+              f"center=({face_center_x},{face_center_y})")
+        print(f"frac_x={frac_x:.4f} frac_y={frac_y:.4f} "
+              f"grow_right_first={grow_right_first} grow_down_first={grow_down_first}")
+        print(f"x_primary_slack={x_primary_slack} x_secondary_slack={x_secondary_slack} "
+              f"y_primary_slack={y_primary_slack} y_secondary_slack={y_secondary_slack}")
+        print(f"face_fit_height={face_fit_height:.2f} (pre-ensure) new_height/new_width after ensure fold-in below")
+        print(f"ensure_active={ensure_active} ensure_axis_is_y={ensure_axis_is_y} "
+              f"y_topup={y_topup:.2f} x_topup={x_topup:.2f}")
+        print(f"FINAL new_height={new_height:.2f} new_width={new_width:.2f} "
+              f"(body was {body_width}x{body_height}, image is {image_width}x{image_height})")
+        print(f"new_body_x={new_body_x:.2f} new_body_y={new_body_y:.2f}")
+        print(f"gap right of face = {(new_body_x+new_width)-abs_face_right:.2f} "
+              f"(target if x-axis ensure: {ensureUpperBodyPct*face_width:.2f})")
+        print(f"gap below face = {(new_body_y+new_height)-abs_face_bottom:.2f} "
+              f"(target if y-axis ensure: {ensureUpperBodyPct*face_height:.2f})")
+        print(f"final rounded return: body=({int(round(new_body_x))},{int(round(new_body_y))},"
+              f"{int(round(new_width))},{int(round(new_height))}) "
+              f"face=({int(round(final_abs_face_x))},{int(round(final_abs_face_y))},"
+              f"{int(round(final_face_width))},{int(round(final_face_height))})")
+        print("=== end debug ===")
+
+        # Return absolute coordinates for face box (not relative to body box)
+        return (int(round(new_body_x)), int(round(new_body_y)), int(round(new_width)), int(round(new_height)),
+                int(round(final_abs_face_x)), int(round(final_abs_face_y)), int(round(final_face_width)), int(round(final_face_height)),
+                int(round(final_abs_face_x - new_body_x)), int(round(final_abs_face_y - new_body_y)))
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("body_x", "body_y", "body_width", "body_height", "face_x", "face_y", "face_width", "face_height", "face_x_body_rel", "face_y_body_rel")
     FUNCTION = "faceBodyAspectBounds"
     CATEGORY = "🐝TinyBee/Util"
 
@@ -3085,6 +3428,64 @@ class imp_floatsToRectNode:
     CATEGORY = "🐝TinyBee/Casting"
 
 
+class imp_emptyStringToNullNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string": ("STRING", {"default": "", "forceInput": True}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @staticmethod
+    def emptyStringToNull(string):
+        value = _unwrap_single_value(string)
+        if isinstance(value, str) and value.strip() == "":
+            return (None,)
+        return (value,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "emptyStringToNull"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
+class imp_nullToStringNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "string": ("STRING", {"default": "", "forceInput": True}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @staticmethod
+    def nullToString(string):
+        value = _unwrap_single_value(string)
+        if value is None:
+            return ("",)
+        return (value,)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "nullToString"
+    CATEGORY = "🐝TinyBee/Casting"
+
+
 class imp_rectToFloatsNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -3257,6 +3658,56 @@ class imp_scaleRectNode:
     CATEGORY = "🐝TinyBee/Rectangles"
 
 
+class imp_rectToMaskNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 512, "min": 1, "max": 100000}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 100000}),
+                "tinyrect": ("TINYRECT",),
+                "invert": ("BOOLEAN", {"default": False}),
+                "uvRect": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    @staticmethod
+    def rectToMask(width, height, tinyrect, invert, uvRect):
+        width = int(_unwrap_single_value(width))
+        height = int(_unwrap_single_value(height))
+        invert = bool(_unwrap_single_value(invert))
+        uvRect = bool(_unwrap_single_value(uvRect))
+
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        if uvRect:
+            # uv coordinates: 1.0 == the image's width/height
+            x *= width
+            y *= height
+            w *= width
+            h *= height
+
+        # Normalize in case width/height are negative, then clamp to the mask bounds
+        x0, x1 = (x, x + w) if w >= 0 else (x + w, x)
+        y0, y1 = (y, y + h) if h >= 0 else (y + h, y)
+        x0 = max(0, min(width, int(round(x0))))
+        x1 = max(0, min(width, int(round(x1))))
+        y0 = max(0, min(height, int(round(y0))))
+        y1 = max(0, min(height, int(round(y1))))
+
+        mask = torch.zeros((1, height, width), dtype=torch.float32)
+        mask[:, y0:y1, x0:x1] = 1.0
+
+        if invert:
+            mask = 1.0 - mask
+
+        return (mask,)
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("mask",)
+    FUNCTION = "rectToMask"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
 class imp_sequenceNode:
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -3386,6 +3837,70 @@ class imp_padImageInPlaceNode:
     CATEGORY = "🐝TinyBee/Images"
 
 
+class imp_cropGrowImageToBoundsNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "x": ("INT", {"default": 0, "min": -100000, "max": 100000}),
+                "y": ("INT", {"default": 0, "min": -100000, "max": 100000}),
+                "width": ("INT", {"default": 512, "min": 1, "max": 100000}),
+                "height": ("INT", {"default": 512, "min": 1, "max": 100000}),
+            }
+        }
+
+    @staticmethod
+    def cropGrowImageToBounds(image, x, y, width, height):
+        """Crop an image to the given x,y,width,height rect.
+
+        Only the overlap between the rect and the source image is kept; no
+        padding is added. outpaintLeft/Right/Top/Bottom report how much the
+        rect extended past the source image in each direction (0 when
+        padded is False), so a downstream node can grow the crop back out.
+        """
+        x = int(_unwrap_single_value(x))
+        y = int(_unwrap_single_value(y))
+        width = max(1, int(_unwrap_single_value(width)))
+        height = max(1, int(_unwrap_single_value(height)))
+
+        batch = _normalize_image_batch(image)
+        if batch.numel() == 0 or batch.shape[1] == 0 or batch.shape[2] == 0:
+            B, H, W, C = 1, 0, 0, 3
+            dtype = torch.float32
+        else:
+            B, H, W, C = batch.shape
+            dtype = batch.dtype
+
+        # Overlap between the requested rect and the source image bounds
+        src_x0 = max(0, x)
+        src_y0 = max(0, y)
+        src_x1 = min(W, x + width)
+        src_y1 = min(H, y + height)
+
+        if src_x1 > src_x0 and src_y1 > src_y0:
+            cropped = batch[:, src_y0:src_y1, src_x0:src_x1, :]
+        else:
+            cropped = torch.empty((B, 0, 0, C), dtype=dtype)
+
+        outpaint_left = max(0, -x)
+        outpaint_top = max(0, -y)
+        outpaint_right = max(0, (x + width) - W)
+        outpaint_bottom = max(0, (y + height) - H)
+
+        padded = bool(outpaint_left or outpaint_top or outpaint_right or outpaint_bottom)
+
+        return (cropped, padded, outpaint_left, outpaint_right, outpaint_top, outpaint_bottom)
+
+    RETURN_TYPES = ("IMAGE", "BOOLEAN", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("image", "padded", "outpaintLeft", "outpaintRight", "outpaintTop", "outpaintBottom")
+    FUNCTION = "cropGrowImageToBounds"
+    CATEGORY = "🐝TinyBee/Images"
+
+
 class imp_interpolateFramesNode:
     def __init__(self):
         pass
@@ -3502,6 +4017,45 @@ class imp_interpolateFramesNode:
     RETURN_NAMES = ("frames",)
     FUNCTION = "interpolateFrames"
     CATEGORY = "🐝TinyBee/Video"
+
+
+class imp_calculateFlux2ImageSizeNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+                "megapixels": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 16.0, "step": 0.01}),
+            }
+        }
+
+    @staticmethod
+    def calculateSize(aspect_ratio, megapixels):
+        """Snaps width/height to the nearest multiple of 16 that best matches the requested aspect ratio and pixel budget."""
+        ratio = float(aspect_ratio)
+        if ratio <= 0:
+            raise ValueError("aspect_ratio must be greater than 0.")
+
+        target_pixels = float(megapixels) * 1_000_000
+
+        raw_height = math.sqrt(target_pixels / ratio)
+        raw_width = raw_height * ratio
+
+        width = max(16, int(round(raw_width / 16.0)) * 16)
+        height = max(16, int(round(raw_height / 16.0)) * 16)
+
+        actual_ratio = width / height
+        actual_megapixels = (width * height) / 1_000_000
+
+        return (width, height, actual_ratio, actual_megapixels)
+
+    RETURN_TYPES = ("INT", "INT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("width", "height", "aspect", "megapixels")
+    FUNCTION = "calculateSize"
+    CATEGORY = "🐝TinyBee/Images"
 
 # ===========================================================================
 
@@ -3792,11 +4346,12 @@ class imp_saveStringToFileNode:
     @staticmethod
     def saveStringToFile(string, filepath, exists_behavior):
         if not filepath.strip():
-            return ()
+            return (string,)
 
         file_exists = os.path.exists(filepath)
         if file_exists and exists_behavior == "Ignore":
-            return ()
+            with open(filepath, "r", encoding="utf-8") as f:
+                return (f.read(),)
 
         parent_dir = os.path.dirname(filepath)
         if parent_dir:
@@ -3806,12 +4361,49 @@ class imp_saveStringToFileNode:
         with open(filepath, mode, encoding="utf-8") as f:
             f.write(string)
 
-        return ()
+        with open(filepath, "r", encoding="utf-8") as f:
+            return (f.read(),)
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("contents",)
     FUNCTION = "saveStringToFile"
     OUTPUT_NODE = True
-    CATEGORY = "🐝TinyBee/Util"
+    CATEGORY = "🐝TinyBee/String"
+
+
+class imp_loadStringFromFileNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "filepath": ("STRING", {"default": "", "forceInput": False}),
+            }
+        }
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Always re-run: the target file's contents can change on disk without
+        # any input to this node changing.
+        return float("NaN")
+
+    @staticmethod
+    def loadStringFromFile(filepath):
+        if not filepath.strip():
+            return ("",)
+
+        if not os.path.exists(filepath):
+            return ("",)
+
+        with open(filepath, "r", encoding="utf-8") as f:
+            return (f.read(),)
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("string",)
+    FUNCTION = "loadStringFromFile"
+    CATEGORY = "🐝TinyBee/String"
 
 
 class imp_saveImageWithMetaNode:
@@ -4256,6 +4848,9 @@ class imp_jsonParserNode:
         except Exception as e:
             raise ValueError(f"JSONata error: {e}") from e
 
+        if result is None:
+            return (None,)
+
         json_result = json_lib.dumps(result, ensure_ascii=False)
 
         if stripQuotes:
@@ -4386,6 +4981,8 @@ NODE_CLASS_MAPPINGS = {
     "Sequence": imp_sequenceNode,
     "Select Bounding Box": imp_selectBoundingBoxNode,
     "Get Mask Bounding Box": imp_getMaskBoundingBoxNode,
+    "Florence2 Caption Data Parser": imp_florence2CaptionDataParserNode,
+    "Combine Florence2 Caption Data": imp_combineFlorence2CaptionDataNode,
     "Face Body Aspect Bounds": imp_faceBodyAspectBoundsNode,
     "Iterate Seed": imp_iterateSeedNode,
     "Auto Seed": imp_autoSeedNode,
@@ -4401,6 +4998,8 @@ NODE_CLASS_MAPPINGS = {
     "Sanitize File Path": imp_sanitizeFilePathNode,
     "String Combiner": imp_stringCombinerNode,
     "Json Input": imp_jsonInputNode,
+    "Save String to File": imp_saveStringToFileNode,
+    "Load String from File": imp_loadStringFromFileNode,
 
     # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
@@ -4414,6 +5013,8 @@ NODE_CLASS_MAPPINGS = {
     "String Compare": imp_stringCompareNode,
     "Float to Int": imp_floatToIntNode,
     "Int to Float": imp_intToFloatNode,
+    "Empty String To Null": imp_emptyStringToNullNode,
+    "Null To String": imp_nullToStringNode,
 
     # Rectangle Nodes
     "Rect to Floats": imp_rectToFloatsNode,
@@ -4423,6 +5024,7 @@ NODE_CLASS_MAPPINGS = {
     "Intersect Rects": imp_intersectRectsNode,
     "Rect From Image": imp_rectFromImgNode,
     "Scale Rect": imp_scaleRectNode,
+    "Rect To Mask": imp_rectToMaskNode,
 
     # Workflow Nodes
     "Grid Maker (Dynamic)": imp_gridMakerDynamicNode,
@@ -4430,7 +5032,6 @@ NODE_CLASS_MAPPINGS = {
     "Randomize Image Batch": imp_randomizeImageBatchNode,
     "Images From Batch": imp_imagesFromBatchNode,
     "Save Image Batch to Zip": imp_saveImageBatchToZipNode,
-    "Save String to File": imp_saveStringToFileNode,
     "Save Image w/Meta": imp_saveImageWithMetaNode,
     "Load Image w/Meta": imp_loadImageWithMetaNode,
     "Load Image Batch from Zip": imp_loadImageBatchFromZipNode,
@@ -4443,7 +5044,9 @@ NODE_CLASS_MAPPINGS = {
 
     # Image Nodes
     "Pad Image In Place": imp_padImageInPlaceNode,
+    "Crop/Grow Image to Bounds": imp_cropGrowImageToBoundsNode,
     "Interpolate Frames": imp_interpolateFramesNode,
+    "Calculate Flux.2 Image Size": imp_calculateFlux2ImageSizeNode,
 }
 
 
