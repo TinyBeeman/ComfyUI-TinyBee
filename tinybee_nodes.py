@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import zipfile
 from io import BytesIO, StringIO
-from PIL import Image
+from PIL import Image, ImageDraw
 from PIL.PngImagePlugin import PngInfo
 import folder_paths
 from comfy.cli_args import args
@@ -2196,8 +2196,8 @@ class imp_getMaskBoundingBoxNode:
             },
         }
     
-    RETURN_TYPES = ("MASK", "INT", "INT", "INT", "INT")
-    RETURN_NAMES =("mask", "xLeft", "yTop", "width", "height")
+    RETURN_TYPES = ("MASK", "INT", "INT", "INT", "INT", "TINYRECT")
+    RETURN_NAMES =("mask", "xLeft", "yTop", "width", "height", "tinyrect")
     FUNCTION = "get_bounding_box"
     CATEGORY = "🐝TinyBee/Util"
 
@@ -2213,7 +2213,7 @@ class imp_getMaskBoundingBoxNode:
         if mask is None:
             # Return an empty 1x1 mask tensor [B,H,W] to satisfy type/shape
             empty = torch.zeros((1, 1, 1), dtype=torch.float32)
-            return (empty, 0, 0, 0, 0)
+            return (empty, 0, 0, 0, 0, (0, 0, 0, 0))
 
         if isinstance(mask, torch.Tensor):
             t = mask
@@ -2225,7 +2225,7 @@ class imp_getMaskBoundingBoxNode:
                 t = torch.tensor(mask)
             except Exception:
                 empty = torch.zeros((1, 1, 1), dtype=torch.float32)
-                return (empty, 0, 0, 0, 0)
+                return (empty, 0, 0, 0, 0, (0, 0, 0, 0))
 
         # Ensure float32 for mask math; keep device
         device = t.device if isinstance(t, torch.Tensor) else "cpu"
@@ -2249,7 +2249,7 @@ class imp_getMaskBoundingBoxNode:
         else:
             # Unsupported rank; return empty
             empty = torch.zeros((1, 1, 1), dtype=torch.float32, device=device)
-            return (empty, 0, 0, 0, 0)
+            return (empty, 0, 0, 0, 0, (0, 0, 0, 0))
 
         # Force single channel output (C=1)
         if t.shape[-1] != 1:
@@ -2262,7 +2262,7 @@ class imp_getMaskBoundingBoxNode:
 
         if not torch.any(active_any):
             zero = torch.zeros((B, H, W), dtype=torch.float32, device=device)
-            return (zero, 0, 0, 0, 0)
+            return (zero, 0, 0, 0, 0, (0, 0, 0, 0))
 
         ys, xs = torch.where(active_any)
         x_min = int(xs.min().item())
@@ -2310,7 +2310,7 @@ class imp_getMaskBoundingBoxNode:
         bbox_mask = rect.expand(B, H, W, 1).to(dtype=t.dtype)  # [B, H, W, 1]
         bbox_mask = bbox_mask.squeeze(-1)  # [B, H, W]
 
-        return (bbox_mask, x_min, y_min, width, height)
+        return (bbox_mask, x_min, y_min, width, height, (x_min, y_min, width, height))
 
 
 class imp_florence2CaptionDataParserNode:
@@ -2326,8 +2326,8 @@ class imp_florence2CaptionDataParserNode:
             },
         }
 
-    RETURN_TYPES = ("MASK", "TINYRECT")
-    RETURN_NAMES = ("mask", "tinyrect")
+    RETURN_TYPES = ("MASK", "TINYRECT", "BOOLEAN", "INT", "INT", "BOOLEAN", "BOOLEAN", "BOOLEAN", "BOOLEAN")
+    RETURN_NAMES = ("mask", "tinyrect", "empty", "center_x", "center_y", "left_flush", "top_flush", "right_flush", "bottom_flush")
     FUNCTION = "parse"
     CATEGORY = "🐝TinyBee/Util"
 
@@ -2381,17 +2381,30 @@ class imp_florence2CaptionDataParserNode:
         final_mask = include_mask & (~exclude_mask)
         mask_tensor = final_mask.to(dtype=torch.float32).unsqueeze(0)  # [1, H, W]
 
-        if torch.any(final_mask):
+        is_empty = not torch.any(final_mask)
+        if not is_empty:
             ys, xs = torch.where(final_mask)
             x_min = int(xs.min().item())
             x_max = int(xs.max().item())
             y_min = int(ys.min().item())
             y_max = int(ys.max().item())
-            tinyrect = (float(x_min), float(y_min), float(x_max - x_min + 1), float(y_max - y_min + 1))
+            rect_w = x_max - x_min + 1
+            rect_h = y_max - y_min + 1
+            tinyrect = (float(x_min), float(y_min), float(rect_w), float(rect_h))
+
+            center_x = int(round(x_min + rect_w / 2.0))
+            center_y = int(round(y_min + rect_h / 2.0))
+            left_flush = x_min == 0
+            top_flush = y_min == 0
+            right_flush = (x_min + rect_w) >= w
+            bottom_flush = (y_min + rect_h) >= h
         else:
             tinyrect = (0.0, 0.0, 0.0, 0.0)
+            center_x = 0
+            center_y = 0
+            left_flush = top_flush = right_flush = bottom_flush = False
 
-        return (mask_tensor, tinyrect)
+        return (mask_tensor, tinyrect, bool(is_empty), center_x, center_y, left_flush, top_flush, right_flush, bottom_flush)
 
 
 class imp_combineFlorence2CaptionDataNode:
@@ -3374,20 +3387,20 @@ class imp_floatsToRectNode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "nanValue": ("FLOAT", {"default": -1.0}),
+                "nanValue": ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
             },
             "optional": {
-                "x":  ("FLOAT", {"default": -1.0}),
-                "y":  ("FLOAT", {"default": -1.0}),
-                "w":  ("FLOAT", {"default": -1.0}),
-                "h":  ("FLOAT", {"default": -1.0}),
-                "x2": ("FLOAT", {"default": -1.0}),
-                "y2": ("FLOAT", {"default": -1.0}),
+                "x":  ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
+                "y":  ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
+                "w":  ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
+                "h":  ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
+                "x2": ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
+                "y2": ("FLOAT", {"default": -9999.0, "min": -99999.0, "max": 99999.0}),
             }
         }
 
     @staticmethod
-    def floatsToRect(nanValue, x=-1.0, y=-1.0, w=-1.0, h=-1.0, x2=-1.0, y2=-1.0):
+    def floatsToRect(nanValue, x=-9999.0, y=-9999.0, w=-9999.0, h=-9999.0, x2=-9999.0, y2=-9999.0):
         nan = float(nanValue)
 
         def is_set(v):
@@ -3498,10 +3511,10 @@ class imp_rectToFloatsNode:
     @staticmethod
     def rectToFloats(tinyrect):
         x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
-        return (x, y, w, h, x + w, y + h)
+        return (x, y, w, h, x + w, y + h, x + w / 2, y + h / 2)
 
-    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT")
-    RETURN_NAMES = ("x", "y", "w", "h", "x2", "y2")
+    RETURN_TYPES = ("FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT", "FLOAT")
+    RETURN_NAMES = ("x", "y", "w", "h", "x2", "y2", "center_x", "center_y")
     FUNCTION = "rectToFloats"
     CATEGORY = "🐝TinyBee/Rectangles"
 
@@ -3580,10 +3593,11 @@ class imp_rectToIntsNode:
         x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
         conv = round if roundFloats else int
         ix, iy, iw, ih = conv(x), conv(y), conv(w), conv(h)
-        return (ix, iy, iw, ih, ix + iw, iy + ih)
+        cx, cy = conv(x + w / 2), conv(y + h / 2)
+        return (ix, iy, iw, ih, ix + iw, iy + ih, cx, cy)
 
-    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("x", "y", "w", "h", "x2", "y2")
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("x", "y", "w", "h", "x2", "y2", "center_x", "center_y")
     FUNCTION = "rectToInts"
     CATEGORY = "🐝TinyBee/Rectangles"
 
@@ -3614,6 +3628,43 @@ class imp_intersectRectsNode:
     CATEGORY = "🐝TinyBee/Rectangles"
 
 
+class imp_boundRectsNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "rectA": ("TINYRECT",),
+                "rectB": ("TINYRECT",),
+            }
+        }
+
+    @staticmethod
+    def boundRects(rectA, rectB):
+        ax, ay, aw, ah = float(rectA[0]), float(rectA[1]), float(rectA[2]), float(rectA[3])
+        bx, by, bw, bh = float(rectB[0]), float(rectB[1]), float(rectB[2]), float(rectB[3])
+        a_empty = aw <= 0 or ah <= 0
+        b_empty = bw <= 0 or bh <= 0
+
+        if a_empty and b_empty:
+            return ((0.0, 0.0, 0.0, 0.0),)
+        if a_empty:
+            return ((bx, by, bw, bh),)
+        if b_empty:
+            return ((ax, ay, aw, ah),)
+
+        ix = min(ax, bx)
+        iy = min(ay, by)
+        ix2 = max(ax + aw, bx + bw)
+        iy2 = max(ay + ah, by + bh)
+        return ((ix, iy, ix2 - ix, iy2 - iy),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "boundRects"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+
 class imp_rectFromImgNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -3636,21 +3687,80 @@ class imp_rectFromImgNode:
     CATEGORY = "🐝TinyBee/Rectangles"
 
 
+class imp_getUVRectNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tinyrect": ("TINYRECT",),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "image_w": ("INT", {"default": 0, "min": 0, "max": 100000}),
+                "image_h": ("INT", {"default": 0, "min": 0, "max": 100000}),
+            }
+        }
+
+    @staticmethod
+    def getUVRect(tinyrect, image=None, image_w=0, image_h=0):
+        if image is not None:
+            batch = _normalize_image_batch(image)
+            width = float(batch.shape[2])
+            height = float(batch.shape[1])
+        else:
+            width = float(_unwrap_single_value(image_w))
+            height = float(_unwrap_single_value(image_h))
+
+        if width <= 0 or height <= 0:
+            raise ValueError("GetUVRect requires either an image or a positive image_w/image_h")
+
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        return ((x / width, y / height, w / width, h / height),)
+
+    RETURN_TYPES = ("TINYRECT",)
+    RETURN_NAMES = ("tinyrect",)
+    FUNCTION = "getUVRect"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
 class imp_scaleRectNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "tinyrect": ("TINYRECT",),
+                "mode": (["scaleFromOrigin", "scaleFromUV", "scaleFromAbsolute"], {"default": "scaleFromOrigin"}),
                 "xScale": ("FLOAT", {"default": 1.0, "step": 0.01}),
                 "yScale": ("FLOAT", {"default": 1.0, "step": 0.01}),
+                "uvCenterX": ("FLOAT", {"default": 0.5, "step": 0.01}),
+                "uvCenterY": ("FLOAT", {"default": 0.5, "step": 0.01}),
+                "absCenterX": ("FLOAT", {"default": 0.0, "step": 0.01}),
+                "absCenterY": ("FLOAT", {"default": 0.0, "step": 0.01})
             }
         }
 
     @staticmethod
-    def scaleRect(tinyrect, xScale, yScale):
+    def scaleRect(tinyrect, mode, xScale, yScale, uvCenterX, uvCenterY, absCenterX, absCenterY):
+        
         x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
-        return ((x * float(xScale), y * float(yScale), w * float(xScale), h * float(yScale)),)
+        if mode == "scaleFromOrigin":
+            return ((x * float(xScale), y * float(yScale), w * float(xScale), h * float(yScale)),)
+        elif mode == "scaleFromUV":
+            cx = float(uvCenterX) * w + x
+            cy = float(uvCenterY) * h + y
+            w *= float(xScale)
+            h *= float(yScale)
+            x = cx - float(uvCenterX) * w
+            y = cy - float(uvCenterY) * h
+            return ((x, y, w, h),)
+        elif mode == "scaleFromAbsolute":
+            cx = float(absCenterX)
+            cy = float(absCenterY)
+            w *= float(xScale)
+            h *= float(yScale)
+            x = cx - w / 2
+            y = cy - h / 2
+            return ((x, y, w, h),)
 
     RETURN_TYPES = ("TINYRECT",)
     RETURN_NAMES = ("tinyrect",)
@@ -3705,6 +3815,215 @@ class imp_rectToMaskNode:
     RETURN_TYPES = ("MASK",)
     RETURN_NAMES = ("mask",)
     FUNCTION = "rectToMask"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+class imp_rectInsideImageNode:
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "tinyrect": ("TINYRECT",),
+                "tolerance_pct": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 1.0}),
+            }
+        }
+
+    @staticmethod
+    def rectInsideImage(image, tinyrect, tolerance_pct):
+        batch = _normalize_image_batch(image)
+
+        left, top, width, height = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        tolerance = float(_unwrap_single_value(tolerance_pct)) / 100.0
+        right = left + width
+        bottom = top + height
+
+        image_w = batch.shape[2]
+        image_h = batch.shape[1]
+
+        leftInset = left >= 0
+        leftOutset = left < 0
+        leftFlush = abs(left - 0) <= tolerance * image_w
+
+        topInset = top >= 0
+        topOutset = top < 0
+        topFlush = abs(top - 0) <= tolerance * image_h
+
+        rightInset = right <= image_w
+        rightOutset = right > image_w
+        rightFlush = abs(right - image_w) <= tolerance * image_w
+
+        bottomInset = bottom <= image_h
+        bottomOutset = bottom > image_h
+        bottomFlush = abs(bottom - image_h) <= tolerance * image_h
+
+        allInset = leftInset and topInset and rightInset and bottomInset
+        allOutset = leftOutset and topOutset and rightOutset and bottomOutset
+        allFlush = leftFlush and topFlush and rightFlush and bottomFlush
+
+        someInset = leftInset or topInset or rightInset or bottomInset
+        someOutset = leftOutset or topOutset or rightOutset or bottomOutset
+        someFlush = leftFlush or topFlush or rightFlush or bottomFlush
+
+        return (allInset, allOutset, allFlush,
+                someInset, someOutset, someFlush,
+                leftInset, leftOutset, leftFlush,
+                topInset, topOutset, topFlush,
+                rightInset, rightOutset, rightFlush,
+                bottomInset, bottomOutset, bottomFlush)
+        
+
+    # Return all Booleans
+    RETURN_TYPES = ("BOOLEAN",
+                    "BOOLEAN",
+                    "BOOLEAN",
+
+                    "BOOLEAN",
+                    "BOOLEAN",
+                    "BOOLEAN",
+
+                    "BOOLEAN",
+                    "BOOLEAN",
+                    "BOOLEAN",
+
+                    "BOOLEAN",
+                    "BOOLEAN",
+                    "BOOLEAN",
+
+                    "BOOLEAN",
+                    "BOOLEAN",
+                    "BOOLEAN",
+
+                    "BOOLEAN",
+                    "BOOLEAN",
+                    "BOOLEAN")
+    
+    RETURN_NAMES = (
+                    "allInset",
+                    "allOutset",
+                    "allFlush",
+
+                    "someInset",
+                    "someOutset",
+                    "someFlush",
+
+                    "leftInset",
+                    "leftOutset",
+                    "leftFlush",
+
+                    "topInset",
+                    "topOutset",
+                    "topFlush",
+
+                    "rightInset",
+                    "rightOutset",
+                    "rightFlush",
+
+                    "bottomInset",
+                    "bottomOutset",
+                    "bottomFlush")
+    
+    FUNCTION = "rectInsideImage"
+    CATEGORY = "🐝TinyBee/Rectangles"
+
+
+
+class imp_drawTinyRectNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "tinyrect": ("TINYRECT",),
+                "rectColor": ("STRING", {"default": "255, 255, 255"}),
+                "paddingColor": ("STRING", {"default": "0, 0, 0"}),
+                "padImageToFit": ("BOOLEAN", {"default": True}),
+                "strokeWidth": ("FLOAT", {"default": 10.0, "min": 0.0, "max": 1000.0, "step": 0.5}),
+            }
+        }
+
+    @staticmethod
+    def _parse_color(color_str, channels):
+        parts = [p.strip() for p in str(color_str).split(",") if p.strip() != ""]
+        values = [max(0.0, min(255.0, float(p))) / 255.0 for p in parts] or [0.0]
+        while len(values) < min(channels, 3):
+            values.append(values[-1])
+        if channels >= 4:
+            if len(values) < 4:
+                values.append(1.0)
+        return tuple(values[:channels])
+
+    @staticmethod
+    def drawTinyRect(image, tinyrect, rectColor, paddingColor, padImageToFit, strokeWidth=3.0):
+        rectColor = _unwrap_single_value(rectColor)
+        paddingColor = _unwrap_single_value(paddingColor)
+        padImageToFit = bool(_unwrap_single_value(padImageToFit))
+        strokeWidth = float(_unwrap_single_value(strokeWidth))
+
+        batch = _normalize_image_batch(image)
+        if batch.numel() == 0 or batch.shape[1] == 0 or batch.shape[2] == 0:
+            return (batch,)
+
+        B, H, W, C = batch.shape
+
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+        # Normalize in case width/height are negative
+        x0, x1 = (x, x + w) if w >= 0 else (x + w, x)
+        y0, y1 = (y, y + h) if h >= 0 else (y + h, y)
+
+        pad_left = int(math.ceil(max(0.0, -x0))) if padImageToFit else 0
+        pad_top = int(math.ceil(max(0.0, -y0))) if padImageToFit else 0
+        pad_right = int(math.ceil(max(0.0, x1 - W))) if padImageToFit else 0
+        pad_bottom = int(math.ceil(max(0.0, y1 - H))) if padImageToFit else 0
+
+        pad_rgba = imp_drawTinyRectNode._parse_color(paddingColor, C)
+        pad_color = torch.tensor(pad_rgba, dtype=batch.dtype)
+
+        if pad_left or pad_top or pad_right or pad_bottom:
+            new_w = W + pad_left + pad_right
+            new_h = H + pad_top + pad_bottom
+            canvas = torch.empty((B, new_h, new_w, C), dtype=batch.dtype)
+            canvas[:] = pad_color
+            canvas[:, pad_top:pad_top + H, pad_left:pad_left + W, :] = batch
+        else:
+            canvas = batch.clone()
+
+        # Shift the rect into the (possibly padded) canvas space, then clamp to it
+        _, canvas_h, canvas_w, _ = canvas.shape
+        draw_x0 = max(0.0, min(canvas_w, x0 + pad_left))
+        draw_y0 = max(0.0, min(canvas_h, y0 + pad_top))
+        draw_x1 = max(0.0, min(canvas_w, x1 + pad_left))
+        draw_y1 = max(0.0, min(canvas_h, y1 + pad_top))
+
+        stroke = int(round(strokeWidth))
+        if stroke <= 0 or draw_x1 <= draw_x0 or draw_y1 <= draw_y0 or C not in (1, 3, 4):
+            return (canvas,)
+
+        rect_rgb = imp_drawTinyRectNode._parse_color(rectColor, C)
+        mode = {1: "L", 3: "RGB", 4: "RGBA"}[C]
+        outline = tuple(int(round(v * 255.0)) for v in rect_rgb)
+        if C == 1:
+            outline = outline[0]
+
+        canvas_np = (canvas.clamp(0, 1) * 255.0).round().to(torch.uint8).cpu().numpy()
+        out_frames = []
+        for i in range(canvas_np.shape[0]):
+            frame = canvas_np[i][:, :, 0] if C == 1 else canvas_np[i]
+            pil_img = Image.fromarray(frame, mode=mode)
+            draw = ImageDraw.Draw(pil_img)
+            draw.rectangle([draw_x0, draw_y0, draw_x1, draw_y1], outline=outline, width=stroke)
+            out_arr = np.array(pil_img).astype(np.float32) / 255.0
+            if C == 1:
+                out_arr = out_arr[:, :, np.newaxis]
+            out_frames.append(out_arr)
+
+        out = torch.from_numpy(np.stack(out_frames, axis=0)).to(batch.dtype)
+        return (out,)
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "drawTinyRect"
     CATEGORY = "🐝TinyBee/Rectangles"
 
 
@@ -3850,18 +4169,26 @@ class imp_cropGrowImageToBoundsNode:
                 "y": ("INT", {"default": 0, "min": -100000, "max": 100000}),
                 "width": ("INT", {"default": 512, "min": 1, "max": 100000}),
                 "height": ("INT", {"default": 512, "min": 1, "max": 100000}),
+            },
+            "optional": {
+                "tinyrect": ("TINYRECT",),
             }
         }
 
     @staticmethod
-    def cropGrowImageToBounds(image, x, y, width, height):
+    def cropGrowImageToBounds(image, x, y, width, height, tinyrect=None):
         """Crop an image to the given x,y,width,height rect.
 
         Only the overlap between the rect and the source image is kept; no
         padding is added. outpaintLeft/Right/Top/Bottom report how much the
         rect extended past the source image in each direction (0 when
         padded is False), so a downstream node can grow the crop back out.
+
+        If tinyrect is provided, it is used in place of x/y/width/height.
         """
+        if tinyrect is not None:
+            x, y, width, height = tinyrect
+
         x = int(_unwrap_single_value(x))
         y = int(_unwrap_single_value(y))
         width = max(1, int(_unwrap_single_value(width)))
@@ -4368,7 +4695,7 @@ class imp_saveStringToFileNode:
     RETURN_NAMES = ("contents",)
     FUNCTION = "saveStringToFile"
     OUTPUT_NODE = True
-    CATEGORY = "🐝TinyBee/String"
+    CATEGORY = "🐝TinyBee/Strings"
 
 
 class imp_loadStringFromFileNode:
@@ -4403,7 +4730,7 @@ class imp_loadStringFromFileNode:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("string",)
     FUNCTION = "loadStringFromFile"
-    CATEGORY = "🐝TinyBee/String"
+    CATEGORY = "🐝TinyBee/Strings"
 
 
 class imp_saveImageWithMetaNode:
@@ -5022,9 +5349,13 @@ NODE_CLASS_MAPPINGS = {
     "Rect to Ints": imp_rectToIntsNode,
     "Ints to Rect": imp_intsToRectNode,
     "Intersect Rects": imp_intersectRectsNode,
+    "Bound Rects": imp_boundRectsNode,
     "Rect From Image": imp_rectFromImgNode,
+    "Get UV Rect": imp_getUVRectNode,
     "Scale Rect": imp_scaleRectNode,
     "Rect To Mask": imp_rectToMaskNode,
+    "Draw TinyRect": imp_drawTinyRectNode,
+    "Rect Inside Image": imp_rectInsideImageNode,
 
     # Workflow Nodes
     "Grid Maker (Dynamic)": imp_gridMakerDynamicNode,
