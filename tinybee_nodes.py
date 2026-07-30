@@ -2954,6 +2954,28 @@ class imp_floatToIntNode:
     CATEGORY = "🐝TinyBee/Casting"
 
 
+class imp_boolToIntNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "boolean": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    @staticmethod
+    def boolToInt(boolean):
+        """Convert boolean to integer: returns 1 for True, 0 for False."""
+        return (1 if boolean else 0,)
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("integer",)
+    FUNCTION = "boolToInt"
+    CATEGORY = "🐝TinyBee/Casting"
+
 class imp_intToBoolNode:
     def __init__(self):
         pass
@@ -3842,21 +3864,21 @@ class imp_rectInsideImageNode:
         image_w = batch.shape[2]
         image_h = batch.shape[1]
 
-        leftInset = left >= 0
-        leftOutset = left < 0
         leftFlush = abs(left - 0) <= tolerance * image_w
+        leftInset = left >= 0 and not leftFlush
+        leftOutset = left < 0 and not leftFlush
 
-        topInset = top >= 0
-        topOutset = top < 0
         topFlush = abs(top - 0) <= tolerance * image_h
+        topInset = top >= 0 and not topFlush
+        topOutset = top < 0 and not topFlush
 
-        rightInset = right <= image_w
-        rightOutset = right > image_w
         rightFlush = abs(right - image_w) <= tolerance * image_w
+        rightInset = right <= image_w and not rightFlush
+        rightOutset = right > image_w and not rightFlush
 
-        bottomInset = bottom <= image_h
-        bottomOutset = bottom > image_h
         bottomFlush = abs(bottom - image_h) <= tolerance * image_h
+        bottomInset = bottom <= image_h and not bottomFlush
+        bottomOutset = bottom > image_h and not bottomFlush
 
         allInset = leftInset and topInset and rightInset and bottomInset
         allOutset = leftOutset and topOutset and rightOutset and bottomOutset
@@ -3927,6 +3949,126 @@ class imp_rectInsideImageNode:
     FUNCTION = "rectInsideImage"
     CATEGORY = "🐝TinyBee/Rectangles"
 
+
+class imp_changeRectAspectNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "tinyrect": ("TINYRECT",),
+                "aspect_ratio": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+                "center_w": ("BOOLEAN", {"default": False, "label_on": "Centered", "label_off": "Grow Right"}),
+                "center_h": ("BOOLEAN", {"default": False, "label_on": "Centered", "label_off": "Grow Bottom"}),
+                "limits": (["ignore image bounds", "enforce image bounds", "best fit"], {"default": "enforce image bounds"}),
+            }
+        }
+
+    @staticmethod
+    def _split_delta(delta, centered):
+        # Split a signed grow(+)/shrink(-) delta into (low_delta, high_delta) for the
+        # left/top vs right/bottom side. Centered splits evenly; otherwise the low
+        # (x/y) side stays fixed and the full delta applies to the high side.
+        if centered:
+            half = delta / 2.0
+            return half, half
+        return 0.0, delta
+
+    @staticmethod
+    def _resolve_growth(growth, room_low, room_high, centered, mode):
+        # Returns (low_delta, high_delta) for growing a single axis by `growth`
+        # (>= 0), honoring the centered anchor preference and the limits mode.
+        target_low, target_high = imp_changeRectAspectNode._split_delta(growth, centered)
+        if mode == "ignore image bounds":
+            return target_low, target_high
+
+        # Centered-first-then-shift-overflow-to-the-other-side, clamped to what's
+        # actually available on each side.
+        lo_bound = max(0.0, growth - room_high)
+        hi_bound = min(room_low, growth)
+        if lo_bound <= hi_bound:
+            low = min(max(target_low, lo_bound), hi_bound)
+            return low, growth - low
+
+        if mode == "best fit":
+            # Can't stay within bounds no matter the split; revert to the
+            # original strategy and accept exceeding the bounds.
+            return target_low, target_high
+
+        # enforce image bounds: grow as much as possible on both sides; the
+        # caller shrinks the other axis to restore the exact aspect ratio.
+        return room_low, room_high
+
+    @staticmethod
+    def changeRectAspect(image, tinyrect, aspect_ratio, center_w, center_h, limits):
+        aspect_ratio = float(_unwrap_single_value(aspect_ratio))
+        center_w = bool(_unwrap_single_value(center_w))
+        center_h = bool(_unwrap_single_value(center_h))
+        limits = _unwrap_single_value(limits)
+        if aspect_ratio <= 0:
+            aspect_ratio = 1.0
+
+        batch = _normalize_image_batch(image)
+        iw = float(batch.shape[2])
+        ih = float(batch.shape[1])
+
+        x, y, w, h = float(tinyrect[0]), float(tinyrect[1]), float(tinyrect[2]), float(tinyrect[3])
+
+        EPS = 1e-6
+        shrunk = False
+        current_ratio = (w / h) if h > 0 else aspect_ratio
+
+        if abs(current_ratio - aspect_ratio) <= EPS:
+            new_x, new_y, new_w, new_h = x, y, w, h
+        elif current_ratio < aspect_ratio:
+            # Width is deficient: grow width, height untouched unless enforce
+            # mode needs to shrink it below to compensate for capped growth.
+            growth = h * aspect_ratio - w
+            room_low = max(0.0, x)
+            room_high = max(0.0, iw - (x + w))
+            low, high = imp_changeRectAspectNode._resolve_growth(growth, room_low, room_high, center_w, limits)
+            new_x = x - low
+            new_w = w + low + high
+            new_y, new_h = y, h
+
+            if limits == "enforce image bounds" and (low + high) < growth - EPS:
+                new_h = new_w / aspect_ratio
+                low_h, high_h = imp_changeRectAspectNode._split_delta(new_h - h, center_h)
+                new_y = y - low_h
+                new_h = h + low_h + high_h
+                shrunk = True
+        else:
+            # Height is deficient: grow height, width untouched unless enforce
+            # mode needs to shrink it below to compensate for capped growth.
+            growth = (w / aspect_ratio) - h
+            room_low = max(0.0, y)
+            room_high = max(0.0, ih - (y + h))
+            low, high = imp_changeRectAspectNode._resolve_growth(growth, room_low, room_high, center_h, limits)
+            new_y = y - low
+            new_h = h + low + high
+            new_x, new_w = x, w
+
+            if limits == "enforce image bounds" and (low + high) < growth - EPS:
+                new_w = new_h * aspect_ratio
+                low_w, high_w = imp_changeRectAspectNode._split_delta(new_w - w, center_w)
+                new_x = x - low_w
+                new_w = w + low_w + high_w
+                shrunk = True
+
+        if limits == "enforce image bounds":
+            exceeded_bounds = False
+        else:
+            exceeded_bounds = (
+                new_x < -EPS or new_y < -EPS or
+                new_x + new_w > iw + EPS or new_y + new_h > ih + EPS
+            )
+
+        return ((new_x, new_y, new_w, new_h), exceeded_bounds, shrunk)
+
+    RETURN_TYPES = ("TINYRECT", "BOOLEAN", "BOOLEAN")
+    RETURN_NAMES = ("tinyrect", "exceeded_bounds", "shrunk")
+    FUNCTION = "changeRectAspect"
+    CATEGORY = "🐝TinyBee/Rectangles"
 
 
 class imp_drawTinyRectNode:
@@ -4169,6 +4311,8 @@ class imp_cropGrowImageToBoundsNode:
                 "y": ("INT", {"default": 0, "min": -100000, "max": 100000}),
                 "width": ("INT", {"default": 512, "min": 1, "max": 100000}),
                 "height": ("INT", {"default": 512, "min": 1, "max": 100000}),
+                "allowGrowth": ("BOOLEAN", {"default": False}),
+                "outpaintColor": ("STRING", {"default": "(255, 255, 255)"}),
             },
             "optional": {
                 "tinyrect": ("TINYRECT",),
@@ -4176,13 +4320,37 @@ class imp_cropGrowImageToBoundsNode:
         }
 
     @staticmethod
-    def cropGrowImageToBounds(image, x, y, width, height, tinyrect=None):
+    def _parse_outpaint_color(color_str, channels):
+        s = str(color_str).strip()
+        if s.startswith("#"):
+            h = s.lstrip("#")
+            values = [int(h[i:i + 2], 16) / 255.0 for i in range(0, min(len(h), 8), 2)]
+        else:
+            s = s.strip("()[] ")
+            parts = [p.strip() for p in s.split(",") if p.strip() != ""]
+            values = [max(0.0, min(255.0, float(p))) / 255.0 for p in parts]
+        if not values:
+            values = [0.0]
+        while len(values) < min(channels, 3):
+            values.append(values[-1])
+        if channels >= 4 and len(values) < 4:
+            values.append(1.0)
+        return tuple(values[:channels])
+
+    @staticmethod
+    def cropGrowImageToBounds(image, x, y, width, height, tinyrect=None, allowGrowth=False, outpaintColor="(255, 255, 255)"):
         """Crop an image to the given x,y,width,height rect.
 
         Only the overlap between the rect and the source image is kept; no
-        padding is added. outpaintLeft/Right/Top/Bottom report how much the
-        rect extended past the source image in each direction (0 when
-        padded is False), so a downstream node can grow the crop back out.
+        padding is added by default. outpaintLeft/Right/Top/Bottom report how
+        much the rect extended past the source image in each direction (0
+        when padded is False), so a downstream node can grow the crop back
+        out.
+
+        If allowGrowth is True, the output is instead grown to the full
+        width/height of the requested rect, filling the area outside the
+        source image with outpaintColor (a "(255, 255, 255)" or "#ffffff"
+        style color string).
 
         If tinyrect is provided, it is used in place of x/y/width/height.
         """
@@ -4193,6 +4361,8 @@ class imp_cropGrowImageToBoundsNode:
         y = int(_unwrap_single_value(y))
         width = max(1, int(_unwrap_single_value(width)))
         height = max(1, int(_unwrap_single_value(height)))
+        allow_growth = bool(_unwrap_single_value(allowGrowth))
+        outpaint_color = _unwrap_single_value(outpaintColor)
 
         batch = _normalize_image_batch(image)
         if batch.numel() == 0 or batch.shape[1] == 0 or batch.shape[2] == 0:
@@ -4219,6 +4389,16 @@ class imp_cropGrowImageToBoundsNode:
         outpaint_bottom = max(0, (y + height) - H)
 
         padded = bool(outpaint_left or outpaint_top or outpaint_right or outpaint_bottom)
+
+        if allow_growth and padded:
+            color_vals = imp_cropGrowImageToBoundsNode._parse_outpaint_color(outpaint_color, C)
+            color = torch.tensor(color_vals, dtype=dtype)
+            canvas = torch.empty((B, height, width, C), dtype=dtype)
+            canvas[:] = color
+            ch, cw = cropped.shape[1], cropped.shape[2]
+            if ch > 0 and cw > 0:
+                canvas[:, outpaint_top:outpaint_top + ch, outpaint_left:outpaint_left + cw, :] = cropped
+            cropped = canvas
 
         return (cropped, padded, outpaint_left, outpaint_right, outpaint_top, outpaint_bottom)
 
@@ -5330,6 +5510,7 @@ NODE_CLASS_MAPPINGS = {
 
     # Casting Nodes
     "Int to Boolean": imp_intToBoolNode,
+    "Boolean to Int": imp_boolToIntNode,
     "Int to Leading String": imp_intToLeadingStringNode,
     "String to Int": imp_stringToIntNode,
     "String to Float": imp_stringToFloatNode,
@@ -5356,6 +5537,7 @@ NODE_CLASS_MAPPINGS = {
     "Rect To Mask": imp_rectToMaskNode,
     "Draw TinyRect": imp_drawTinyRectNode,
     "Rect Inside Image": imp_rectInsideImageNode,
+    "Change Rect Aspect": imp_changeRectAspectNode,
 
     # Workflow Nodes
     "Grid Maker (Dynamic)": imp_gridMakerDynamicNode,
