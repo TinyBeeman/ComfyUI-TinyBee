@@ -194,7 +194,7 @@ class imp_randomFileEntryNode:
                 "file_list": ("STRING", {"forceInput": True}),
             },
             "optional": {
-                "even_chance_depth": ("INT", {"default": -1, "min": -1, "max": 100, "forceInput": False, "help": "If > 0, will randomly choose from subfolders to that level of depth, -1 for all levels"}),
+                "even_chance_depth": ("INT", {"default": -1, "min": -1, "max": 100, "forceInput": False, "help": "0 = pick uniformly from all files, ignoring folder structure. Any other value gives each subfolder the same odds as a sibling file at every level, all the way down to the leaf folders (the number itself no longer caps how deep that fairness goes)."}),
             }
         }
 
@@ -242,63 +242,31 @@ class imp_randomFileEntryNode:
         folder_structure = TinyFolderStructure(common_root)
         folder_structure.populateSubfolders(non_ignored_files)
 
-        # Navigate to the target depth or as deep as possible
-        current_folder = folder_structure
-        depth = 0
-        
-        if depth_value == -1:
-            # For depth -1, navigate randomly to any depth
-            while True:
-                subfolders = current_folder.getSubfolders()
-                if not subfolders:
-                    break
-                current_folder = random.choice(subfolders)
-                print(f"Random folder at depth {depth + 1}: {current_folder.path}")
-                depth += 1
-            # Pick from all files at this final location
-            final_files = [f for f in non_ignored_files if f.startswith(current_folder.path)]
-        else:
-            # Navigate to the specified depth, collecting a bucket for direct files
-            # at each intermediate level so they aren't excluded from selection.
-            buckets = []
+        # At each level, this folder's own direct files count as one option and
+        # each subfolder counts as one option, all picked with equal probability
+        # (this is what makes it "even chance" per folder rather than per file).
+        # populateSubfolders already built the full recursive tree up front, so
+        # there's no cost benefit to capping this recursion early - it keeps
+        # applying the same even-chance choice at every level, all the way down
+        # to a true leaf folder (one with no subfolders left), regardless of
+        # even_chance_depth's numeric value.
+        def pick_files_at_depth(folder):
+            subfolders = folder.getSubfolders()
+            if not subfolders:
+                return [f for f in non_ignored_files if f.startswith(folder.path)]
 
-            while depth < depth_value:
-                # Files directly in the current folder get their own bucket
-                level_direct = current_folder.getDirectFiles()
-                if level_direct:
-                    buckets.append(level_direct)
-                    print(f"Bucket (depth {depth}): {len(level_direct)} direct files in {current_folder.path}")
-
-                subfolders = current_folder.getSubfolders()
-                if not subfolders:
-                    # Can't go deeper, stop here
-                    break
-                current_folder = random.choice(subfolders)
-                print(f"Navigating to depth {depth + 1}: {current_folder.path}")
-                depth += 1
-
-            # At target depth: one bucket for direct files, one per subfolder
-            direct_files = current_folder.getDirectFiles()
+            direct_files = folder.getDirectFiles()
+            choices = [("subfolder", sf) for sf in subfolders]
             if direct_files:
-                buckets.append(direct_files)
-                print(f"Bucket (depth {depth}): {len(direct_files)} direct files in {current_folder.path}")
+                choices.append(("direct", direct_files))
 
-            subfolders = current_folder.getSubfolders()
-            for subfolder in subfolders:
-                subfolder_files = [f for f in non_ignored_files if f.startswith(subfolder.path)]
-                if subfolder_files:
-                    buckets.append(subfolder_files)
-                    print(f"Bucket: {len(subfolder_files)} files in {subfolder.path}")
-            
-            # If no buckets were created, fall back to all files from current folder
-            if not buckets:
-                final_files = [f for f in non_ignored_files if f.startswith(current_folder.path)]
-            else:
-                # Randomly select one bucket with equal probability
-                selected_bucket = random.choice(buckets)
-                final_files = selected_bucket
-                print(f"Selected bucket with {len(final_files)} files")
-        
+            kind, value = random.choice(choices)
+            if kind == "direct":
+                return value
+            return pick_files_at_depth(value)
+
+        final_files = pick_files_at_depth(folder_structure)
+
         if final_files:
             return (random.choice(final_files),)
         
@@ -862,6 +830,44 @@ class imp_stringToListNode:
     OUTPUT_IS_LIST = (True,)
     FUNCTION = "parseList"
     CATEGORY = "🐝TinyBee/Lists"
+
+class imp_jsonArrayToListNode:
+    def __init__(self):
+        pass
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "json": ("STRING", {"default": "[]", "forceInput": False, "multiline": True}),
+            }
+        }
+
+    @staticmethod
+    def parseJsonList(json):
+        s = _unwrap_single_value(json)
+        s = "[]" if s is None else str(s).strip()
+
+        # If the string is a quoted string, strip the quotes
+        s = _strip_quotes(s)
+
+        try:
+            parsed = json_lib.loads(s)
+        except Exception as e:
+            raise ValueError(f"[TinyBee] JsonArrayToListNode error parsing JSON array: {e}") from e
+
+        if not isinstance(parsed, list):
+            raise ValueError(f"[TinyBee] JsonArrayToListNode expected a JSON array, got {type(parsed).__name__}")
+
+        return ([str(x) for x in parsed],)
+
+    INPUT_IS_LIST = False
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("list",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "parseJsonList"
+    CATEGORY = "🐝TinyBee/Lists"
+
 
 
 class imp_csvParserNode:
@@ -4316,6 +4322,8 @@ class imp_cropGrowImageToBoundsNode:
             },
             "optional": {
                 "tinyrect": ("TINYRECT",),
+                "imgOriginal": ("IMAGE",),
+                "rectOriginalCrop": ("TINYRECT",),
             }
         }
 
@@ -4338,7 +4346,7 @@ class imp_cropGrowImageToBoundsNode:
         return tuple(values[:channels])
 
     @staticmethod
-    def cropGrowImageToBounds(image, x, y, width, height, tinyrect=None, allowGrowth=False, outpaintColor="(255, 255, 255)"):
+    def cropGrowImageToBounds(image, x, y, width, height, tinyrect=None, allowGrowth=False, outpaintColor="(255, 255, 255)", imgOriginal=None, rectOriginalCrop=None):
         """Crop an image to the given x,y,width,height rect.
 
         Only the overlap between the rect and the source image is kept; no
@@ -4350,9 +4358,17 @@ class imp_cropGrowImageToBoundsNode:
         If allowGrowth is True, the output is instead grown to the full
         width/height of the requested rect, filling the area outside the
         source image with outpaintColor (a "(255, 255, 255)" or "#ffffff"
-        style color string).
+        style color string). The mask output marks which output pixels are
+        this synthetic fill (1.0) vs. real source-image content (0.0).
 
         If tinyrect is provided, it is used in place of x/y/width/height.
+
+        If both imgOriginal and rectOriginalCrop are provided, image is
+        assumed to have originally been cropped from imgOriginal using
+        rectOriginalCrop. imgOriginal is then used as the crop source
+        instead of image, with the requested rect translated into
+        imgOriginal's coordinate space, so real pixels beyond image's
+        current bounds can be used before falling back to outpaintColor.
         """
         if tinyrect is not None:
             x, y, width, height = tinyrect
@@ -4364,7 +4380,12 @@ class imp_cropGrowImageToBoundsNode:
         allow_growth = bool(_unwrap_single_value(allowGrowth))
         outpaint_color = _unwrap_single_value(outpaintColor)
 
-        batch = _normalize_image_batch(image)
+        use_original = imgOriginal is not None and rectOriginalCrop is not None
+        if use_original:
+            x += int(round(float(rectOriginalCrop[0])))
+            y += int(round(float(rectOriginalCrop[1])))
+
+        batch = _normalize_image_batch(imgOriginal if use_original else image)
         if batch.numel() == 0 or batch.shape[1] == 0 or batch.shape[2] == 0:
             B, H, W, C = 1, 0, 0, 3
             dtype = torch.float32
@@ -4390,20 +4411,28 @@ class imp_cropGrowImageToBoundsNode:
 
         padded = bool(outpaint_left or outpaint_top or outpaint_right or outpaint_bottom)
 
+        ch, cw = cropped.shape[1], cropped.shape[2]
+
         if allow_growth and padded:
             color_vals = imp_cropGrowImageToBoundsNode._parse_outpaint_color(outpaint_color, C)
             color = torch.tensor(color_vals, dtype=dtype)
             canvas = torch.empty((B, height, width, C), dtype=dtype)
             canvas[:] = color
-            ch, cw = cropped.shape[1], cropped.shape[2]
             if ch > 0 and cw > 0:
                 canvas[:, outpaint_top:outpaint_top + ch, outpaint_left:outpaint_left + cw, :] = cropped
             cropped = canvas
 
-        return (cropped, padded, outpaint_left, outpaint_right, outpaint_top, outpaint_bottom)
+        if allow_growth and padded:
+            mask = torch.ones((B, height, width), dtype=torch.float32)
+            if ch > 0 and cw > 0:
+                mask[:, outpaint_top:outpaint_top + ch, outpaint_left:outpaint_left + cw] = 0.0
+        else:
+            mask = torch.zeros((B, ch, cw), dtype=torch.float32)
 
-    RETURN_TYPES = ("IMAGE", "BOOLEAN", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("image", "padded", "outpaintLeft", "outpaintRight", "outpaintTop", "outpaintBottom")
+        return (cropped, mask, padded, outpaint_left, outpaint_right, outpaint_top, outpaint_bottom)
+
+    RETURN_TYPES = ("IMAGE", "MASK", "BOOLEAN", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("image", "mask", "padded", "outpaintLeft", "outpaintRight", "outpaintTop", "outpaintBottom")
     FUNCTION = "cropGrowImageToBounds"
     CATEGORY = "🐝TinyBee/Images"
 
@@ -5454,6 +5483,7 @@ class imp_tokenReplaceNode:
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
+
     # List Nodes
     "CSV Parser": imp_csvParserNode,
     "Combine Lists": imp_combineListsNode,
@@ -5472,7 +5502,8 @@ NODE_CLASS_MAPPINGS = {
     "Sort List": imp_sortListNode,
     "Split List": imp_splitListNode,
     "String To List": imp_stringToListNode,
-
+    "Json Array To List": imp_jsonArrayToListNode,
+    
     # Dictionary Nodes
     "File Metadata": imp_fileMetadataNode,
     "Dictionary Lookup": imp_dictionaryLookupNode,
