@@ -429,7 +429,7 @@ class imp_randomizeListNode:
         return {
             "required": {
                 "string_list": ("STRING", {"forceInput": True}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True})
             }
         }
 
@@ -531,7 +531,7 @@ class imp_sortListNode:
                 "string_list": ("STRING", {"forceInput": True}),
                 "sort_method": (["default", "date", "filename", "parent folder", "full path", "random"], {"default": "default"}),
                 "sort_ascending": ("BOOLEAN", {"default": True, "label_on": "Ascending", "label_off": "Descending"}),
-                "seed": ("INT", {"default": 0, "min": -1, "max": 0xffffffffffffffff}),
+                "seed": ("INT", {"default": 0, "min": -1, "max": 0xffffffffffffffff, "control_after_generate": True}),
             }
         }
 
@@ -1112,7 +1112,7 @@ class imp_getFileListNode:
                 "glob_pattern": ("STRING", {"default": "**/*" }),
                 "sort_method": (["default", "date", "filename", "parent folder", "full path", "random"], {"default": "default"}),
                 "sort_ascending": ("BOOLEAN", {"default": True, "label_on": "Ascending", "label_off": "Descending"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True})
             },
             "optional": {
                 "allowed_extensions": ("STRING", {"default": ".jpeg,.jpg,.png,.tiff,.gif,.bmp,.webp"}),
@@ -1524,7 +1524,7 @@ class imp_randomizeImageBatchNode:
         return {
             "required": {
                 "image_batch": ("IMAGE", {"forceInput": True}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff})
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True})
             }
         }
 
@@ -4960,6 +4960,9 @@ class imp_saveImageWithMetaNode:
                 "save_workspace":   ("BOOLEAN", {"default": True,
                                                  "label_on": "Save Workspace",
                                                  "label_off": "No Workspace"}),
+                "enabled":          ("BOOLEAN", {"default": True,
+                                                 "label_on": "Enabled",
+                                                 "label_off": "Disabled"}),
             },
             "optional": {
                 "metadata_props": ("TINYPROPS", {"default": None}),
@@ -4976,7 +4979,10 @@ class imp_saveImageWithMetaNode:
 
     def save_image_with_meta(self, images, prefix="ComfyUI", prefix_delimiter="_",
                              prefix_2="", output_folder="", save_workspace=True,
-                             metadata_props=None, prompt=None, extra_pnginfo=None):
+                             enabled=True, metadata_props=None, prompt=None, extra_pnginfo=None):
+        if not enabled:
+            return {"ui": {"images": []}, "result": (images,)}
+
         full_prefix = prefix + (prefix_delimiter + prefix_2 if prefix_2.strip() else "")
         if output_folder.strip():
             full_prefix = output_folder.strip() + "/" + full_prefix
@@ -5349,7 +5355,7 @@ class imp_jsonParserNode:
                 "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
                 "jsonata": ("STRING", {"default": "$", "multiline": False, "forceInput": False}),
                 "stripQuotes": ("BOOLEAN", {"default": True, "label_on": "Strip Quotes", "label_off": "Keep Quotes"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
             }
         }
 
