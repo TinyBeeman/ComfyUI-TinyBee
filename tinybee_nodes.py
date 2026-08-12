@@ -4781,20 +4781,53 @@ class imp_getJsonFromPropertiesNode:
     CATEGORY = "🐝TinyBee/Queue"
 
 class imp_saveImageBatchToZipNode:
+    # --- Polyglot PNG+ZIP format ---
+    # When `polyglot_img` is supplied (and compress_to_zip is on), the saved
+    # .png file is a *polyglot*: a normal, fully valid PNG image immediately
+    # followed by a normal, fully valid ZIP archive. Layout on disk:
+    #
+    #   [ PNG signature + chunks ... IEND chunk ]  <- polyglot_img, viewable as a normal image
+    #   [ ZIP local file headers + data ]          <- the batch images (+ optional json)
+    #   [ ZIP central directory ]
+    #   [ ZIP end-of-central-directory (EOCD) record ]
+    #
+    # This works because the two formats are read from opposite ends of the
+    # file and neither cares about trailing/leading bytes belonging to the
+    # other:
+    #   - PNG decoders read forward from byte 0 and stop at the IEND chunk,
+    #     ignoring anything appended after it.
+    #   - ZIP readers locate the archive by scanning backward from EOF for the
+    #     EOCD signature (0x06054b50), then read the "offset of start of
+    #     central directory" it contains. Because that offset was written
+    #     assuming the ZIP data starts at byte 0 (not at the end of the PNG),
+    #     compliant readers detect the mismatch against the EOCD's own file
+    #     position and add a correction (base_offset = eocd_file_offset -
+    #     recorded_cd_size - recorded_cd_offset) to every header offset. This
+    #     "prepended data" correction is standard behavior (it's the same
+    #     mechanism that lets self-extracting .exe+zip archives work) and is
+    #     implemented by Python's zipfile, 7-Zip, WinRAR, macOS Archive
+    #     Utility, and most `unzip` builds.
+    #
+    # To extract the zip payload from a polyglot file, a tool does NOT need
+    # to know where the PNG ends — just open the whole file as a zip archive
+    # normally, e.g. `unzip file.png` or Python's
+    # `zipfile.ZipFile("file.png")`. No offset bookkeeping or PNG parsing is
+    # required on the reading side; it falls out of the ZIP spec itself.
     def __init__(self):
         self.output_dir = folder_paths.get_output_directory()
-        
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image_batch": ("IMAGE", {"forceInput": True}),
                 "filename_prefix": ("STRING", {"default": "batch", "forceInput": False}),
-                "compress_to_zip": ("BOOLEAN", {"default": True, "label_on": "Compress to Zip", "label_off": "Export as Folder"}), 
+                "compress_to_zip": ("BOOLEAN", {"default": True, "label_on": "Compress to Zip", "label_off": "Export as Folder"}),
             },
             "optional": {
                 "json_filename": ("STRING", {"default": "metadata.json", "forceInput": False}),
                 "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "polyglot_img": ("IMAGE", {"default": None, "forceInput": True}),
             }
         }
 
@@ -4802,13 +4835,13 @@ class imp_saveImageBatchToZipNode:
     def IS_CHANGED(cls, **kwargs):
         # This node has file-system side effects and should always run when queued.
         return float("NaN")
-    
-    def saveImageBatchToZip(self, image_batch, filename_prefix, compress_to_zip=True, json_filename="", json=""):
+
+    def saveImageBatchToZip(self, image_batch, filename_prefix, compress_to_zip=True, json_filename="", json="", polyglot_img=None):
         if image_batch is None or len(image_batch) == 0:
             return ()
 
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir)
-        
+
         # Convert to torch tensor if not already
         if isinstance(image_batch, np.ndarray):
             image_batch = torch.from_numpy(image_batch)
@@ -4818,12 +4851,12 @@ class imp_saveImageBatchToZipNode:
                 image_batch = torch.stack([torch.tensor(img) if not isinstance(img, torch.Tensor) else img for img in image_batch])
             else:
                 image_batch = torch.tensor(image_batch)
-        
-        
+
+
         # Create zip file
         if compress_to_zip:
-            filename = f"{filename_prefix}.zip"
-            with zipfile.ZipFile(os.path.join(full_output_folder, filename), 'w') as zipf:
+            zip_buffer = BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w') as zipf:
                 # Save each image in the batch
                 for i in range(image_batch.shape[0]):
                     img_tensor = image_batch[i]
@@ -4837,6 +4870,26 @@ class imp_saveImageBatchToZipNode:
                 # Optionally add JSON metadata
                 if json_filename and json:
                     zipf.writestr(json_filename, json)
+            zip_bytes = zip_buffer.getvalue()
+
+            if polyglot_img is not None:
+                # Build the PNG carrier from polyglot_img (first image if a batch)
+                # and append the zip archive right after it. See the class-level
+                # "Polyglot PNG+ZIP format" comment for how this is read back.
+                carrier_tensor = polyglot_img[0] if polyglot_img.dim() == 4 else polyglot_img
+                carrier_array = carrier_tensor.cpu().numpy()
+                carrier_img = Image.fromarray((carrier_array * 255).astype(np.uint8))
+                carrier_bytes = BytesIO()
+                carrier_img.save(carrier_bytes, format='PNG')
+
+                filename = f"{filename_prefix}.png"
+                with open(os.path.join(full_output_folder, filename), 'wb') as f:
+                    f.write(carrier_bytes.getvalue())
+                    f.write(zip_bytes)
+            else:
+                filename = f"{filename_prefix}.zip"
+                with open(os.path.join(full_output_folder, filename), 'wb') as f:
+                    f.write(zip_bytes)
         else:
             # Save images to folder
             subpath = os.path.join(full_output_folder, filename)
@@ -5393,17 +5446,67 @@ class imp_jsonParserNode:
         if result is None:
             return (None,)
 
+        # A plain string result is the only case where dumping to JSON wraps it
+        # in quotes we'd then strip. Return it as-is instead of round-tripping
+        # through json.dumps, so escape sequences like \n / \t come out as real
+        # newlines/tabs rather than the literal two-character JSON escape.
+        if stripQuotes and isinstance(result, str):
+            return (result,)
+
         json_result = json_lib.dumps(result, ensure_ascii=False)
 
         if stripQuotes:
             json_result = _strip_quotes(json_result)
-    
+
         return (json_result,)
 
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("result",)
     FUNCTION = "parseJson"
     CATEGORY = "🐝TinyBee/Strings"
+
+
+def _escape_newlines_tabs_in_json_strings(text):
+    """Escape literal newline/tab/carriage-return characters found inside JSON
+    string literals into \\n / \\t sequences, leaving structural whitespace
+    between tokens untouched. Mirrors the JS-side transform used by the
+    "Convert Escaped Chars" preview mode in tinybee_json_input.js so that
+    text edited with real newlines/tabs round-trips back into valid JSON."""
+    result = []
+    in_string = False
+    escaped = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escaped:
+                result.append(ch)
+                escaped = False
+            elif ch == '\\':
+                result.append(ch)
+                escaped = True
+            elif ch == '"':
+                result.append(ch)
+                in_string = False
+            elif ch == '\n':
+                result.append('\\n')
+            elif ch == '\t':
+                result.append('\\t')
+            elif ch == '\r':
+                # Normalize CRLF and lone CR line breaks to \n so output is
+                # portable across platforms regardless of how the text was typed/pasted.
+                if not (i + 1 < n and text[i + 1] == '\n'):
+                    result.append('\\n')
+                # else: swallow the \r; the following \n is escaped next iteration.
+            else:
+                result.append(ch)
+        else:
+            if ch == '"':
+                in_string = True
+            result.append(ch)
+        i += 1
+    return ''.join(result)
 
 
 class imp_jsonInputNode:
@@ -5415,11 +5518,14 @@ class imp_jsonInputNode:
         return {
             "required": {
                 "json": ("STRING", {"default": "", "multiline": True, "forceInput": False}),
+                "convert_escaped_chars": ("BOOLEAN", {"default": True, "label_on": "Convert", "label_off": "Raw"}),
             }
         }
 
     @staticmethod
-    def passthrough(json):
+    def passthrough(json, convert_escaped_chars=True):
+        if convert_escaped_chars:
+            json = _escape_newlines_tabs_in_json_strings(json)
         return (json,)
 
     RETURN_TYPES = ("STRING",)

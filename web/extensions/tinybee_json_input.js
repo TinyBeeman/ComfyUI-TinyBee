@@ -6,6 +6,103 @@ function getWidget(node, name) {
   return node?.widgets?.find((w) => w.name === name)
 }
 
+function isConvertEnabled(node) {
+  const widget = getWidget(node, 'convert_escaped_chars')
+  return widget ? !!widget.value : false
+}
+
+// Escapes literal newline/tab/carriage-return characters found inside JSON
+// string literals into \n / \t sequences, leaving structural whitespace
+// between tokens untouched. Used before JSON.parse / JSON.stringify and
+// mirrors the Python-side transform applied on output.
+function escapeControlCharsInStrings(text) {
+  let result = ''
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) {
+        result += ch
+        escaped = false
+      } else if (ch === '\\') {
+        result += ch
+        escaped = true
+      } else if (ch === '"') {
+        result += ch
+        inString = false
+      } else if (ch === '\n') {
+        result += '\\n'
+      } else if (ch === '\t') {
+        result += '\\t'
+      } else if (ch === '\r') {
+        // Normalize CRLF and lone CR line breaks to \n so output is portable
+        // across platforms regardless of how the text was typed/pasted.
+        if (text[i + 1] !== '\n') {
+          result += '\\n'
+        }
+        // else: swallow the \r; the following \n is escaped next iteration.
+      } else {
+        result += ch
+      }
+    } else {
+      if (ch === '"') inString = true
+      result += ch
+    }
+  }
+  return result
+}
+
+// Inverse of escapeControlCharsInStrings: turns \n / \t / \r escape
+// sequences inside JSON string literals into real newline/tab characters so
+// multi-line strings preview nicely in the textarea. Other escape sequences
+// (\", \\, \uXXXX, ...) are left untouched.
+function unescapeControlCharsInStrings(text) {
+  let result = ''
+  let inString = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (inString) {
+      if (ch === '\\' && i + 1 < text.length) {
+        const next = text[i + 1]
+        if (next === 'n') {
+          result += '\n'
+          i += 1
+          continue
+        }
+        if (next === 't') {
+          result += '\t'
+          i += 1
+          continue
+        }
+        if (next === 'r') {
+          // Collapse \r or \r\n escapes into a single newline for display.
+          if (text[i + 2] === '\\' && text[i + 3] === 'n') {
+            result += '\n'
+            i += 3
+            continue
+          }
+          result += '\n'
+          i += 1
+          continue
+        }
+        result += ch + next
+        i += 1
+        continue
+      } else if (ch === '"') {
+        inString = false
+        result += ch
+      } else {
+        result += ch
+      }
+    } else {
+      if (ch === '"') inString = true
+      result += ch
+    }
+  }
+  return result
+}
+
 function applyValidState(textarea, errorEl) {
   textarea.style.removeProperty('border')
   textarea.style.removeProperty('outline')
@@ -20,12 +117,13 @@ function applyInvalidState(textarea, errorEl, message) {
   errorEl.style.display = 'block'
 }
 
-function validateJson(textarea, errorEl) {
-  const value = textarea.value
-  if (value.trim() === '') {
+function validateJson(node, textarea, errorEl) {
+  const raw = textarea.value
+  if (raw.trim() === '') {
     applyValidState(textarea, errorEl)
     return
   }
+  const value = isConvertEnabled(node) ? escapeControlCharsInStrings(raw) : raw
   try {
     JSON.parse(value)
     applyValidState(textarea, errorEl)
@@ -56,7 +154,7 @@ function attachJsonValidation(node) {
     'padding:2px 4px;white-space:pre-wrap;word-break:break-word;pointer-events:none;z-index:5;'
   container.appendChild(errorEl)
 
-  const handler = () => validateJson(textarea, errorEl)
+  const handler = () => validateJson(node, textarea, errorEl)
   textarea.addEventListener('input', handler)
 
   node._tinybeeJsonInputAttached = true
@@ -70,8 +168,12 @@ function formatJson(node) {
   const textarea = widget?.inputEl
   if (!textarea) return
 
+  const convert = isConvertEnabled(node)
   try {
-    const formatted = JSON.stringify(JSON.parse(textarea.value), null, 2)
+    const source = convert ? escapeControlCharsInStrings(textarea.value) : textarea.value
+    const parsed = JSON.parse(source)
+    let formatted = JSON.stringify(parsed, null, 2)
+    if (convert) formatted = unescapeControlCharsInStrings(formatted)
     textarea.value = formatted
     textarea.dispatchEvent(new Event('input', { bubbles: true }))
     app.canvas?.setDirty(true, true)
@@ -86,6 +188,37 @@ function addFormatButton(node) {
   node._tinybeeJsonFormatButtonAdded = true
 }
 
+// Gives the auto-generated "convert_escaped_chars" boolean widget a friendly
+// label and, when toggled, converts the current textarea content between its
+// "raw \n / \t escapes" and "real newline / tab characters" representations
+// so the displayed text always matches the new mode.
+function attachConvertToggle(node) {
+  if (node._tinybeeJsonConvertToggleAttached) return
+  const widget = getWidget(node, 'convert_escaped_chars')
+  if (!widget) return
+
+  widget.label = 'Convert Escaped Chars'
+
+  const originalCallback = widget.callback
+  widget.callback = function (value, ...rest) {
+    const result = originalCallback ? originalCallback.call(this, value, ...rest) : undefined
+
+    const jsonWidget = getWidget(node, 'json')
+    const textarea = jsonWidget?.inputEl
+    if (textarea) {
+      textarea.value = value
+        ? unescapeControlCharsInStrings(textarea.value)
+        : escapeControlCharsInStrings(textarea.value)
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    app.canvas?.setDirty(true, true)
+
+    return result
+  }
+
+  node._tinybeeJsonConvertToggleAttached = true
+}
+
 app.registerExtension({
   name: 'TinyBee.JsonInput',
   beforeRegisterNodeDef(nodeType, nodeData) {
@@ -95,6 +228,7 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       const result = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined
       addFormatButton(this)
+      attachConvertToggle(this)
       requestAnimationFrame(() => attachJsonValidation(this))
       return result
     }
@@ -103,6 +237,7 @@ app.registerExtension({
     nodeType.prototype.onConfigure = function () {
       const result = onConfigure ? onConfigure.apply(this, arguments) : undefined
       addFormatButton(this)
+      attachConvertToggle(this)
       requestAnimationFrame(() => attachJsonValidation(this))
       return result
     }
